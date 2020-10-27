@@ -5,6 +5,10 @@ type Response struct {
 }
 
 func (obj *Client) NewResponse() *Response {
+	return NewResponse()
+}
+
+func NewResponse() *Response {
 	return &Response{}
 }
 
