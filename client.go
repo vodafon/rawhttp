@@ -66,6 +66,7 @@ func (obj *Client) Do(req *Request, resp *Response) error {
 	if !req.URI.IsAbs() {
 		return InvalidURLError
 	}
+	req.ParseRawdata()
 	obj.TransformRequestFunc(req)
 	if bytes.HasPrefix(req.Rawdata, []byte("CONNECT ")) {
 		return obj.DoProxy(req, resp)
@@ -207,7 +208,7 @@ func (obj *Client) DoProxy(req *Request, resp *Response) error {
 func (obj *Client) DoConn(conn net.Conn, req *Request, resp *Response) error {
 	defer conn.Close()
 	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Rawdata)
-	conn.Write(req.Rawdata)
+	conn.Write(req.Bytes())
 	bufReader := bufio.NewReader(conn)
 
 	for {
