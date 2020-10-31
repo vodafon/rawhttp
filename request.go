@@ -73,6 +73,9 @@ func (obj *Request) ParseRawdata() error {
 	if obj.parsed {
 		return nil
 	}
+	if !bytes.Contains(obj.Rawdata, []byte("\r\n")) {
+		obj.Rawdata = prepareBytes(obj.Rawdata, &Request{})
+	}
 
 	pieces := bytes.Split(obj.Rawdata, []byte("\r\n\r\n"))
 	headers := bytes.Split(pieces[0], []byte("\r\n"))
@@ -98,7 +101,12 @@ func (obj *Request) ParseRawdata() error {
 		if len(linePieces) > 1 {
 			v = bytes.TrimSpace(bytes.Join(linePieces[1:], []byte(":")))
 		}
-		obj.headers[strings.ToLower(string(k))] = HeaderLine{
+		key := strings.ToLower(string(k))
+		_, ok := obj.headers[key]
+		if ok {
+			key = fmt.Sprintf("%s_%d", key, i)
+		}
+		obj.headers[key] = HeaderLine{
 			Pos:   i,
 			Key:   k,
 			Value: v,
