@@ -1,0 +1,4 @@
+github.com/vodafon/vgutils v0.0.0-20201031081340-1b6be1866ddb h1:Bi9wfeOHdYk3Q3lmv6r+FApEc7pHPMHzdVtohXpiIlQ=
+github.com/vodafon/vgutils v0.0.0-20201031081340-1b6be1866ddb/go.mod h1:/VaYBpWj/PQPuCF87gWFPKX2729n+x85NYrtuZSwY3g=
+golang.org/x/net v0.30.0 h1:AcW1SDZMkb8IpzCdQUaIq2sP4sZ4zw+55h6ynffypl4=
+golang.org/x/net v0.30.0/go.mod h1:2wGyMJ5iFasEhkwi13ChkO/t1ECNC4X4eBKkVFyYFlU=

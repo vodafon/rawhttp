@@ -207,7 +207,7 @@ func (obj *Client) DoProxy(req *Request, resp *Response) error {
 // TODO: debug flag
 func (obj *Client) DoConn(conn net.Conn, req *Request, resp *Response) error {
 	defer conn.Close()
-	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Rawdata)
+	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Bytes())
 	conn.Write(req.Bytes())
 	bufReader := bufio.NewReader(conn)
 
