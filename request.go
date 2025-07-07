@@ -225,6 +225,41 @@ Accept: */*
 	return prepareBytes([]byte(t), &Request{})
 }
 
+func (obj *Client) NewRawPathRequest(u, path string) (*Request, error) {
+	return NewRawPathRequest(u, path)
+}
+
+func NewRawPathRequest(u, path string) (*Request, error) {
+	uri, err := url.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &Request{
+		Rawdata: rawPathTemplate(path),
+		URI:     uri,
+		URL:     u,
+	}
+	err = r.ParseRawdata()
+	if err != nil {
+		return nil, err
+	}
+	PrepareRequest(r)
+	return r, nil
+}
+
+func rawPathTemplate(path string) []byte {
+	t := `GET ||FULLPATH|| HTTP/1.1
+Host: ||HOST||
+Connection: close
+User-Agent: rh.1.1
+Accept: */*
+
+`
+	t = strings.ReplaceAll(t, "||FULLPATH||", path)
+	return prepareBytes([]byte(t), &Request{})
+}
+
 func PrepareRequest(req *Request) {
 	req.method = prepareBytes(req.method, req)
 	req.path = prepareBytes(req.path, req)
