@@ -84,7 +84,6 @@ func (obj *Client) Do(req *Request, resp *Response) error {
 	default:
 		return InvalidURLError
 	}
-	return nil
 }
 
 func (obj *Client) httpDialer() proxy.Dialer {

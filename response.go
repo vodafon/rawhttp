@@ -3,8 +3,12 @@ package rawhttp
 import (
 	"bufio"
 	"bytes"
-	"io/ioutil"
+	"compress/flate"
+	"compress/gzip"
+	"io"
 	"net/http"
+
+	"github.com/andybalholm/brotli"
 )
 
 type Response struct {
@@ -44,7 +48,24 @@ func (obj *Response) ParseRawdata() error {
 		return err
 	}
 
-	obj.body, err = ioutil.ReadAll(resp.Body)
+	var bodyReader io.Reader = resp.Body
+
+	// Handle different compression types
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			panic(err)
+		}
+		defer gzReader.Close()
+		bodyReader = gzReader
+	case "br":
+		bodyReader = brotli.NewReader(resp.Body)
+	case "deflate":
+		bodyReader = flate.NewReader(resp.Body)
+	}
+
+	obj.body, err = io.ReadAll(bodyReader)
 	if err != nil {
 		return err
 	}
