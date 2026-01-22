@@ -17,6 +17,7 @@ type Response struct {
 	parsed     bool
 	httpLine   []byte
 	statusCode int
+	preBody    []byte
 	body       []byte
 }
 
@@ -38,10 +39,24 @@ func (obj *Response) StatusCode() int {
 	return obj.statusCode
 }
 
+func (obj *Response) Bytes() []byte {
+	obj.ParseRawdata()
+
+	var buf bytes.Buffer
+	buf.Write(obj.preBody)
+	buf.Write([]byte("\r\n\r\n"))
+	buf.Write(obj.body)
+
+	return buf.Bytes()
+}
+
 func (obj *Response) ParseRawdata() error {
 	if obj.parsed {
 		return nil
 	}
+
+	parts := bytes.SplitN(obj.Rawdata, []byte("\r\n\r\n"), 2)
+	obj.preBody = parts[0]
 
 	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewBuffer(obj.Rawdata)), &http.Request{})
 	if err != nil {
