@@ -8,12 +8,17 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 )
 
 type Response struct {
 	Rawdata []byte
+
+	// Timing metrics (measured from after request write completes)
+	TimeToFirstByte time.Duration // Time until first response byte received
+	TimeToLastByte  time.Duration // Time until last response byte received
 
 	parsed     bool
 	httpLine   []byte
@@ -34,6 +39,8 @@ func NewResponse() *Response {
 // This is useful when retrying a request after a stale connection error.
 func (obj *Response) Reset() {
 	obj.Rawdata = nil
+	obj.TimeToFirstByte = 0
+	obj.TimeToLastByte = 0
 	obj.parsed = false
 	obj.httpLine = nil
 	obj.statusCode = 0

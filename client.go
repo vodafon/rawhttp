@@ -339,6 +339,8 @@ func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) e
 		return err
 	}
 
+	writeTime := time.Now() // Start timing after write completes
+
 	quietTimeout := obj.QuietTimeout
 	if quietTimeout == 0 {
 		quietTimeout = DefaultQuietTimeout
@@ -366,6 +368,12 @@ func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) e
 
 		n, err := conn.Read(buf)
 		if n > 0 {
+			now := time.Now()
+			if !receivedData {
+				resp.TimeToFirstByte = now.Sub(writeTime)
+			}
+			resp.TimeToLastByte = now.Sub(writeTime)
+
 			receivedData = true
 			// fmt.Printf("===REC===: %q\n", buf[:n])
 			resp.Rawdata = append(resp.Rawdata, buf[:n]...)
