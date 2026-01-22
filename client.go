@@ -1,7 +1,6 @@
 package rawhttp
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/tls"
 	"fmt"
@@ -32,7 +31,18 @@ type Client struct {
 	// Connection pooling
 	pool             *ConnPool
 	DisableKeepAlive bool
+
+	// QuietTimeout is the duration to wait after receiving data before
+	// considering the response complete. This helps detect smuggled responses
+	// and ensures full reads. Default: 2 seconds.
+	// The read loop resets this timer each time data is received.
+	// Total read time is still bounded by Timeout.
+	QuietTimeout time.Duration
 }
+
+const (
+	DefaultQuietTimeout = 10 * time.Millisecond
+)
 
 func (obj *Client) SetProxy(u *url.URL) {
 	proxy.RegisterDialerType("http", newHTTPProxy)
@@ -44,6 +54,7 @@ func NewDefaultClient() *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              time.Second * 10,
+		QuietTimeout:         DefaultQuietTimeout,
 		pool:                 NewDefaultConnPool(),
 	}
 }
@@ -52,6 +63,7 @@ func NewClientTransferVariables() *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequestVariables,
 		Timeout:              time.Second * 10,
+		QuietTimeout:         DefaultQuietTimeout,
 		pool:                 NewDefaultConnPool(),
 	}
 }
@@ -60,6 +72,7 @@ func NewDefaultClientTimeout(d time.Duration) *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              d,
+		QuietTimeout:         DefaultQuietTimeout,
 		pool:                 NewDefaultConnPool(),
 	}
 }
@@ -73,6 +86,7 @@ func NewClientWithPool(pool *ConnPool) *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              time.Second * 10,
+		QuietTimeout:         DefaultQuietTimeout,
 		pool:                 pool,
 	}
 }
@@ -173,21 +187,29 @@ func (obj *Client) DoHTTPS(req *Request, resp *Response) error {
 
 	poolKey := PoolKey("https", req.URI.Hostname(), port)
 
-	// Try to get a connection from the pool
-	var conn net.Conn
+	// Try pooled connection first
 	if obj.pool != nil && !obj.DisableKeepAlive {
-		conn = obj.pool.Get(poolKey)
-	}
-
-	// If no pooled connection, dial a new one
-	if conn == nil {
-		var err error
-		conn, err = obj.httpsDialer().Dial("tcp", req.Addr(port))
-		if err != nil {
-			return err
+		if conn := obj.pool.Get(poolKey); conn != nil {
+			err := obj.doConnWithPool(conn, req, resp, poolKey)
+			if err == nil {
+				return nil
+			}
+			// If stale connection error, close and retry with fresh connection
+			if isStaleConnError(err) {
+				conn.Close()
+				resp.Reset()
+				// Fall through to dial fresh connection
+			} else {
+				return err // Real error, don't retry
+			}
 		}
 	}
 
+	// Dial fresh connection
+	conn, err := obj.httpsDialer().Dial("tcp", req.Addr(port))
+	if err != nil {
+		return err
+	}
 	return obj.doConnWithPool(conn, req, resp, poolKey)
 }
 
@@ -199,21 +221,29 @@ func (obj *Client) DoHTTP(req *Request, resp *Response) error {
 
 	poolKey := PoolKey("http", req.URI.Hostname(), port)
 
-	// Try to get a connection from the pool
-	var conn net.Conn
+	// Try pooled connection first
 	if obj.pool != nil && !obj.DisableKeepAlive {
-		conn = obj.pool.Get(poolKey)
-	}
-
-	// If no pooled connection, dial a new one
-	if conn == nil {
-		var err error
-		conn, err = obj.httpDialer().Dial("tcp", req.Addr(port))
-		if err != nil {
-			return err
+		if conn := obj.pool.Get(poolKey); conn != nil {
+			err := obj.doConnWithPool(conn, req, resp, poolKey)
+			if err == nil {
+				return nil
+			}
+			// If stale connection error, close and retry with fresh connection
+			if isStaleConnError(err) {
+				conn.Close()
+				resp.Reset()
+				// Fall through to dial fresh connection
+			} else {
+				return err // Real error, don't retry
+			}
 		}
 	}
 
+	// Dial fresh connection
+	conn, err := obj.httpDialer().Dial("tcp", req.Addr(port))
+	if err != nil {
+		return err
+	}
 	return obj.doConnWithPool(conn, req, resp, poolKey)
 }
 
@@ -295,26 +325,103 @@ func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, p
 }
 
 // doConnInternal performs the actual HTTP request/response exchange.
+// It uses a two-phase timeout approach:
+//  1. Wait up to Timeout for the first response data
+//  2. After receiving data, use QuietTimeout to detect end of response
+//     (wait for silence before considering response complete)
+//
+// This helps detect smuggled responses and ensures all data is captured.
+// If EOF is received without any data, it returns io.EOF as an error
+// (indicating a stale/closed connection rather than a valid empty response).
 func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) error {
 	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Bytes())
-	conn.Write(req.Bytes())
-	bufReader := bufio.NewReader(conn)
+	if _, err := conn.Write(req.Bytes()); err != nil {
+		return err
+	}
+
+	quietTimeout := obj.QuietTimeout
+	if quietTimeout == 0 {
+		quietTimeout = DefaultQuietTimeout
+	}
+
+	absoluteDeadline := time.Now().Add(obj.Timeout)
+	buf := make([]byte, 4096)
+	receivedData := false
 
 	for {
-		// Set a deadline for reading. Read operation will fail if no data
-		// is received after deadline.
-		conn.SetReadDeadline(time.Now().Add(obj.Timeout))
+		var readDeadline time.Time
 
-		// Read tokens delimited by newline
-		bytes, err := bufReader.ReadBytes('\n')
-		// fmt.Printf("===REC===: %q (%v)\n", bytes, err)
-		resp.Rawdata = append(resp.Rawdata, bytes...)
+		if !receivedData {
+			// Phase 1: Waiting for first data - use absolute deadline (Timeout)
+			readDeadline = absoluteDeadline
+		} else {
+			// Phase 2: Already received data - use QuietTimeout for silence detection
+			// but still respect the absolute deadline
+			readDeadline = time.Now().Add(quietTimeout)
+			if readDeadline.After(absoluteDeadline) {
+				readDeadline = absoluteDeadline
+			}
+		}
+		conn.SetReadDeadline(readDeadline)
+
+		n, err := conn.Read(buf)
+		if n > 0 {
+			receivedData = true
+			// fmt.Printf("===REC===: %q\n", buf[:n])
+			resp.Rawdata = append(resp.Rawdata, buf[:n]...)
+			// Data received - continue reading (quiet timer resets on next iteration)
+			continue
+		}
 
 		if err != nil {
-			if err == io.EOF || strings.HasSuffix(err.Error(), "tls: user canceled") {
+			// Timeout handling
+			if isTimeoutError(err) {
+				if !receivedData {
+					// Phase 1 timeout - no response within Timeout
+					return err
+				}
+				// Phase 2 timeout (QuietTimeout) - response complete
+				return nil
+			}
+
+			// EOF handling
+			if err == io.EOF {
+				if receivedData {
+					// Got data then EOF - valid response completion
+					return nil
+				}
+				// EOF with no data - connection was closed (stale connection)
+				return err
+			}
+
+			if strings.HasSuffix(err.Error(), "tls: user canceled") {
 				return nil
 			}
 			return err
 		}
 	}
+}
+
+// isTimeoutError checks if the error is a network timeout error.
+func isTimeoutError(err error) bool {
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Timeout()
+	}
+	return false
+}
+
+// isStaleConnError returns true if the error indicates a stale/closed connection
+// that may have been valid when pooled but is no longer usable.
+// This helps detect connections closed by the server due to keep-alive timeout.
+func isStaleConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "use of closed network connection")
 }

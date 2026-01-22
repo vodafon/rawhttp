@@ -30,6 +30,17 @@ func NewResponse() *Response {
 	return &Response{}
 }
 
+// Reset clears the response state, allowing the Response to be reused.
+// This is useful when retrying a request after a stale connection error.
+func (obj *Response) Reset() {
+	obj.Rawdata = nil
+	obj.parsed = false
+	obj.httpLine = nil
+	obj.statusCode = 0
+	obj.preBody = nil
+	obj.body = nil
+}
+
 func (obj *Response) Body() []byte {
 	obj.ParseRawdata()
 	return obj.body
