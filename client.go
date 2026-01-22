@@ -28,6 +28,10 @@ type Client struct {
 	TransformRequestFunc func(*Request)
 	Timeout              time.Duration
 	proxyURI             *url.URL
+
+	// Connection pooling
+	pool             *ConnPool
+	DisableKeepAlive bool
 }
 
 func (obj *Client) SetProxy(u *url.URL) {
@@ -40,6 +44,7 @@ func NewDefaultClient() *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              time.Second * 10,
+		pool:                 NewDefaultConnPool(),
 	}
 }
 
@@ -47,6 +52,7 @@ func NewClientTransferVariables() *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequestVariables,
 		Timeout:              time.Second * 10,
+		pool:                 NewDefaultConnPool(),
 	}
 }
 
@@ -54,6 +60,34 @@ func NewDefaultClientTimeout(d time.Duration) *Client {
 	return &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              d,
+		pool:                 NewDefaultConnPool(),
+	}
+}
+
+// NewClientWithPool creates a new client with a custom connection pool.
+// If pool is nil, a default pool is created.
+func NewClientWithPool(pool *ConnPool) *Client {
+	if pool == nil {
+		pool = NewDefaultConnPool()
+	}
+	return &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              time.Second * 10,
+		pool:                 pool,
+	}
+}
+
+// CloseIdleConnections closes all idle connections in the pool.
+func (obj *Client) CloseIdleConnections() {
+	if obj.pool != nil {
+		obj.pool.CloseIdle()
+	}
+}
+
+// Close closes all connections and shuts down the client's connection pool.
+func (obj *Client) Close() {
+	if obj.pool != nil {
+		obj.pool.CloseAll()
 	}
 }
 
@@ -137,11 +171,24 @@ func (obj *Client) DoHTTPS(req *Request, resp *Response) error {
 		port = "443"
 	}
 
-	conn, err := obj.httpsDialer().Dial("tcp", req.Addr(port))
-	if err != nil {
-		return err
+	poolKey := PoolKey("https", req.URI.Hostname(), port)
+
+	// Try to get a connection from the pool
+	var conn net.Conn
+	if obj.pool != nil && !obj.DisableKeepAlive {
+		conn = obj.pool.Get(poolKey)
 	}
-	return obj.DoConn(conn, req, resp)
+
+	// If no pooled connection, dial a new one
+	if conn == nil {
+		var err error
+		conn, err = obj.httpsDialer().Dial("tcp", req.Addr(port))
+		if err != nil {
+			return err
+		}
+	}
+
+	return obj.doConnWithPool(conn, req, resp, poolKey)
 }
 
 func (obj *Client) DoHTTP(req *Request, resp *Response) error {
@@ -150,11 +197,24 @@ func (obj *Client) DoHTTP(req *Request, resp *Response) error {
 		port = "80"
 	}
 
-	conn, err := obj.httpDialer().Dial("tcp", req.Addr(port))
-	if err != nil {
-		return err
+	poolKey := PoolKey("http", req.URI.Hostname(), port)
+
+	// Try to get a connection from the pool
+	var conn net.Conn
+	if obj.pool != nil && !obj.DisableKeepAlive {
+		conn = obj.pool.Get(poolKey)
 	}
-	return obj.DoConn(conn, req, resp)
+
+	// If no pooled connection, dial a new one
+	if conn == nil {
+		var err error
+		conn, err = obj.httpDialer().Dial("tcp", req.Addr(port))
+		if err != nil {
+			return err
+		}
+	}
+
+	return obj.doConnWithPool(conn, req, resp, poolKey)
 }
 
 func (obj *Client) DoProxy(req *Request, resp *Response) error {
@@ -203,9 +263,39 @@ func (obj *Client) DoProxy(req *Request, resp *Response) error {
 	return obj.DoConn(conn, req, resp)
 }
 
-// TODO: debug flag
+// DoConn performs the HTTP request on the given connection and always closes it.
+// This method is kept for backward compatibility and for cases where connection
+// reuse is not desired (e.g., proxy connections).
 func (obj *Client) DoConn(conn net.Conn, req *Request, resp *Response) error {
 	defer conn.Close()
+	return obj.doConnInternal(conn, req, resp)
+}
+
+// doConnWithPool performs the HTTP request and manages connection pooling.
+// The connection will be returned to the pool if reusable, otherwise closed.
+func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, poolKey string) error {
+	err := obj.doConnInternal(conn, req, resp)
+
+	// Determine if we can reuse the connection
+	canReuse := err == nil &&
+		obj.pool != nil &&
+		!obj.DisableKeepAlive &&
+		!req.WantsClose() &&
+		!resp.ConnectionClose()
+
+	if canReuse {
+		if !obj.pool.Put(poolKey, conn) {
+			conn.Close()
+		}
+	} else {
+		conn.Close()
+	}
+
+	return err
+}
+
+// doConnInternal performs the actual HTTP request/response exchange.
+func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) error {
 	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Bytes())
 	conn.Write(req.Bytes())
 	bufReader := bufio.NewReader(conn)
@@ -227,5 +317,4 @@ func (obj *Client) DoConn(conn net.Conn, req *Request, resp *Response) error {
 			return err
 		}
 	}
-	return nil
 }

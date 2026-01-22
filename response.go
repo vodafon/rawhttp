@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/andybalholm/brotli"
 )
@@ -95,4 +96,41 @@ func (obj *Response) ParseRawdata() error {
 
 func (obj *Client) NewRequestResponse() (*Request, *Response) {
 	return obj.NewRequest(), obj.NewResponse()
+}
+
+// ConnectionClose returns true if the response indicates the connection should be closed.
+// This checks for "Connection: close" header in the response.
+func (obj *Response) ConnectionClose() bool {
+	if len(obj.Rawdata) == 0 {
+		return true // No response data, assume connection should be closed
+	}
+
+	// Quick check in raw headers before full parsing
+	// Look for "Connection: close" in the header section
+	headerEnd := bytes.Index(obj.Rawdata, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return true // Malformed response, close connection
+	}
+
+	headers := obj.Rawdata[:headerEnd]
+
+	// Check for Connection header (case-insensitive)
+	lines := bytes.Split(headers, []byte("\r\n"))
+	for _, line := range lines[1:] { // Skip status line
+		if len(line) == 0 {
+			continue
+		}
+		colonIdx := bytes.IndexByte(line, ':')
+		if colonIdx == -1 {
+			continue
+		}
+		key := strings.ToLower(string(bytes.TrimSpace(line[:colonIdx])))
+		if key == "connection" {
+			value := strings.ToLower(string(bytes.TrimSpace(line[colonIdx+1:])))
+			return value == "close"
+		}
+	}
+
+	// No Connection header found - HTTP/1.1 defaults to keep-alive
+	return false
 }

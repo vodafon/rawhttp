@@ -179,6 +179,24 @@ func (obj *Request) Addr(port string) string {
 	return obj.IP + ":" + port
 }
 
+// WantsClose returns true if the request has "Connection: close" header set.
+func (obj *Request) WantsClose() bool {
+	if !obj.parsed {
+		return false
+	}
+	hl, ok := obj.headers["connection"]
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(string(hl.Value), "close")
+}
+
+// SetConnectionClose sets the Connection header to "close", indicating
+// the connection should not be reused after this request.
+func (obj *Request) SetConnectionClose() {
+	obj.SetHeader("connection", []byte("Connection"), []byte("close"))
+}
+
 func (obj *Request) FullPath() string {
 	path := obj.URI.RequestURI()
 	if obj.URI.Fragment == "" {
@@ -217,7 +235,7 @@ func NewBaseRequest(u string) (*Request, error) {
 func baseTemplate() []byte {
 	t := `GET ||FULLPATH|| HTTP/1.1
 Host: ||HOST||
-Connection: close
+Connection: keep-alive
 User-Agent: rh.1.1
 Accept: */*
 
@@ -251,7 +269,7 @@ func NewRawPathRequest(u, path string) (*Request, error) {
 func rawPathTemplate(path string) []byte {
 	t := `GET ||FULLPATH|| HTTP/1.1
 Host: ||HOST||
-Connection: close
+Connection: keep-alive
 User-Agent: rh.1.1
 Accept: */*
 
