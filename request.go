@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/vodafon/vgutils"
@@ -189,15 +190,25 @@ func (obj *Request) WantsUpgrade() bool {
 	return obj.headerHasValue("connection", "upgrade")
 }
 
+// headerHasValue checks if a header contains a specific value
+// Values can be separated by any non-word characters (spaces, commas, etc.)
+// For example: "Connection: host, close, proxy" contains "close" but not "clos"
 func (obj *Request) headerHasValue(header string, value string) bool {
-	if !obj.parsed {
-		return false
-	}
 	hl, ok := obj.headers[header]
-	if !ok {
+	if !ok || string(hl.Value) == "" {
 		return false
 	}
-	return strings.EqualFold(string(hl.Value), value)
+
+	// Split by any non-word characters (equivalent to \W+ in regex)
+	re := regexp.MustCompile(`\W+`)
+	values := re.Split(string(hl.Value), -1)
+
+	for _, v := range values {
+		if strings.EqualFold(v, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetConnectionClose sets the Connection header to "close", indicating
