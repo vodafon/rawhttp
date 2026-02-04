@@ -160,6 +160,33 @@ func TestParseRawdata_DuplicateHeaders(t *testing.T) {
 	}
 }
 
+func TestRequest_DuplicateHostHeaders_Bytes(t *testing.T) {
+	// TDD test: verify that duplicate Host headers are preserved in Bytes() output
+	rawdata := "GET / HTTP/1.1\r\nHost: example1.com\r\nHost: example2.com\r\nConnection: close\r\n\r\n"
+	req := &Request{Rawdata: []byte(rawdata)}
+
+	err := req.ParseRawdata()
+	if err != nil {
+		t.Fatalf("ParseRawdata() error: %v", err)
+	}
+
+	output := req.Bytes()
+
+	// Count occurrences of "Host:" in output - should be 2
+	count := bytes.Count(output, []byte("Host:"))
+	if count != 2 {
+		t.Errorf("expected 2 Host headers in output, got %d.\nOutput:\n%s", count, output)
+	}
+
+	// Verify both specific values are present
+	if !bytes.Contains(output, []byte("Host: example1.com")) {
+		t.Errorf("missing 'Host: example1.com' in output.\nOutput:\n%s", output)
+	}
+	if !bytes.Contains(output, []byte("Host: example2.com")) {
+		t.Errorf("missing 'Host: example2.com' in output.\nOutput:\n%s", output)
+	}
+}
+
 func TestParseRawdata_HeaderWithColonInValue(t *testing.T) {
 	rawdata := "GET / HTTP/1.1\r\nHost: example.com\r\nX-URL: http://foo:8080/bar\r\n\r\n"
 	req := &Request{Rawdata: []byte(rawdata)}
