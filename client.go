@@ -311,6 +311,7 @@ func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, p
 		obj.pool != nil &&
 		!obj.DisableKeepAlive &&
 		!req.WantsClose() &&
+		!req.WantsUpgrade() &&
 		!resp.ConnectionClose()
 
 	if canReuse {

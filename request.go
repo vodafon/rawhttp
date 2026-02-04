@@ -181,14 +181,23 @@ func (obj *Request) Addr(port string) string {
 
 // WantsClose returns true if the request has "Connection: close" header set.
 func (obj *Request) WantsClose() bool {
+	return obj.headerHasValue("connection", "close")
+}
+
+// WantsUpgrade returns true if the request has "Connection: Upgrade" header set.
+func (obj *Request) WantsUpgrade() bool {
+	return obj.headerHasValue("connection", "upgrade")
+}
+
+func (obj *Request) headerHasValue(header string, value string) bool {
 	if !obj.parsed {
 		return false
 	}
-	hl, ok := obj.headers["connection"]
+	hl, ok := obj.headers[header]
 	if !ok {
 		return false
 	}
-	return strings.EqualFold(string(hl.Value), "close")
+	return strings.EqualFold(string(hl.Value), value)
 }
 
 // SetConnectionClose sets the Connection header to "close", indicating
