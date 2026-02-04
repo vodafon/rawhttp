@@ -191,16 +191,17 @@ func (obj *Request) WantsUpgrade() bool {
 }
 
 // headerHasValue checks if a header contains a specific value
-// Values can be separated by any non-word characters (spaces, commas, etc.)
+// Values can be separated by non-word characters except hyphen and underscore (spaces, commas, etc.)
 // For example: "Connection: host, close, proxy" contains "close" but not "clos"
+// Hyphens and underscores are allowed as part of values
 func (obj *Request) headerHasValue(header string, value string) bool {
 	hl, ok := obj.headers[header]
 	if !ok || string(hl.Value) == "" {
 		return false
 	}
 
-	// Split by any non-word characters (equivalent to \W+ in regex)
-	re := regexp.MustCompile(`\W+`)
+	// Split by any non-word characters except hyphen and underscore
+	re := regexp.MustCompile(`[^\w\-_]+`)
 	values := re.Split(string(hl.Value), -1)
 
 	for _, v := range values {
