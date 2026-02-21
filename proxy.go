@@ -33,6 +33,20 @@ func (obj httpsDialer) Dial(network, addr string) (c net.Conn, err error) {
 	})
 }
 
+// bufferedConn wraps a net.Conn with a buffered reader to preserve any
+// data that was buffered during the HTTP CONNECT handshake.
+// Without this wrapper, bufio.Reader used in ReadResponse may read ahead
+// from the connection, and those extra bytes would be lost when the raw
+// conn is returned to the caller.
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
+}
+
 // httpProxy is a HTTP/HTTPS connect proxy.
 type httpProxy struct {
 	host     string
@@ -56,13 +70,11 @@ func newHTTPProxy(uri *url.URL, forward proxy.Dialer) (proxy.Dialer, error) {
 }
 
 func (s *httpProxy) Dial(network, addr string) (net.Conn, error) {
-	// Dial and create the https client connection.
 	c, err := s.forward.Dial("tcp", s.host)
 	if err != nil {
 		return nil, err
 	}
 
-	// HACK. http.ReadRequest also does this.
 	reqURL, err := url.Parse("https://" + addr)
 	if err != nil {
 		c.Close()
@@ -81,16 +93,14 @@ func (s *httpProxy) Dial(network, addr string) (net.Conn, error) {
 	}
 	req.Header.Set("User-Agent", "rawhttp.0.1")
 
-	//connReq := "CONNECT 3a2b56f48487.ngrok.io:443 HTTP/1.1\r\nHost: 3a2b56f48487.ngrok.io:443\r\n\r\n"
-	//_, err = c.Write([]byte(connReq))
-
 	err = req.Write(c)
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(c), req)
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		c.Close()
 		return nil, err
@@ -102,57 +112,7 @@ func (s *httpProxy) Dial(network, addr string) (net.Conn, error) {
 		return nil, err
 	}
 
-	return c, nil
-}
-
-func (s *httpProxy) Dial2(network, addr string) (net.Conn, error) {
-	// Dial and create the https client connection.
-	fmt.Println(network, addr, s.host, 1)
-	c, err := s.forward.Dial("tcp", s.host)
-	fmt.Println(network, addr, 2)
-	if err != nil {
-		return nil, err
-	}
-
-	// HACK. http.ReadRequest also does this.
-	reqURL, err := url.Parse("https://" + addr)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	reqURL.Scheme = ""
-
-	fmt.Println(reqURL.String(), 2)
-	req, err := http.NewRequest("CONNECT", reqURL.String(), nil)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	req.Close = false
-	if s.haveAuth {
-		req.SetBasicAuth(s.username, s.password)
-	}
-	req.Header.Set("User-Agent", "rawhttp.0.1")
-
-	err = req.Write(c)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-
-	resp, err := http.ReadResponse(bufio.NewReader(c), req)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		c.Close()
-		err = fmt.Errorf("Connect server using proxy error, StatusCode [%d]", resp.StatusCode)
-		return nil, err
-	}
-
-	return c, nil
+	return &bufferedConn{Conn: c, reader: br}, nil
 }
 
 func ProxyFromURL(u *url.URL, forward proxy.Dialer) (proxy.Dialer, error) {

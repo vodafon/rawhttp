@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -44,9 +45,13 @@ const (
 	DefaultQuietTimeout = 10 * time.Millisecond
 )
 
+var registerProxyOnce sync.Once
+
 func (obj *Client) SetProxy(u *url.URL) {
-	proxy.RegisterDialerType("http", newHTTPProxy)
-	proxy.RegisterDialerType("https", newHTTPProxy)
+	registerProxyOnce.Do(func() {
+		proxy.RegisterDialerType("http", newHTTPProxy)
+		proxy.RegisterDialerType("https", newHTTPProxy)
+	})
 	obj.proxyURI = u
 }
 
@@ -173,7 +178,12 @@ func (obj *Client) DoWithProxy(req *Request, resp *Response) error {
 	if req.URI.Scheme == "https" {
 		tlsConn := tls.Client(conn, &tls.Config{
 			InsecureSkipVerify: true,
+			ServerName:         req.URI.Hostname(),
 		})
+		if err := tlsConn.Handshake(); err != nil {
+			conn.Close()
+			return fmt.Errorf("TLS handshake through proxy error: %w", err)
+		}
 		return obj.DoConn(tlsConn, req, resp)
 	}
 	return obj.DoConn(conn, req, resp)
