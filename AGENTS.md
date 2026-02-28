@@ -26,13 +26,13 @@ go test -v -run TestParseRawdata ./...
 
 1. **`client.go`**: `Client` struct and connection pooling. Implements `Do()`, `DoHTTP()`, `DoHTTPS()`, `DoProxy()`, `DoWithProxy()`, and `DoConn()`. Uses a two-phase timeout read loop: `Timeout` for the first byte, then `QuietTimeout` for silence detection to capture smuggled responses.
 2. **`request.go`**: `Request` struct for raw HTTP requests. Includes `ParseRawdata()` to split bytes into components and `Bytes()` for serialization. Supports template variables like `||HOST||`, `||PATH||`, and `||CLEN||`.
-    - **Limitation**: Headers are stored in `map[string]HeaderLine`. Duplicate headers use a `key_N` suffix hack (e.g., `cookie_1`). Order is maintained via the `Pos` field during reconstruction.
+    - Headers are stored in `[]HeaderLine` slice, preserving order and duplicates natively.
 3. **`response.go`**: `Response` struct with timing metrics (`TimeToFirstByte`, `TimeToLastByte`). Handles Content-Encoding decompression (gzip, br, deflate).
-    - **Note**: `ParseRawdata()` currently relies on `http.ReadResponse`, which is a target for replacement to avoid canonicalization.
-4. **`read.go`**: Wire-level HTTP parsing from `bufio.Reader` streams. Implements `ReadRequest()` and `ReadResponse()` for MITM proxy use. Includes helpers: `readHTTPLine()`, `readHeaders()`, `readBody()`, `readChunked()`. Defines sentinel errors (`ErrMalformedRequest`, `ErrMalformedResponse`, `ErrLineTooLong`).
+    - `ParseRawdata()` uses the custom `ReadResponse()` from `read.go` internally — no `net/http` dependency.
+4. **`read.go`**: Wire-level HTTP parsing from `bufio.Reader` streams. Implements `ReadRequest()` and `ReadResponse()` for MITM proxy use. Includes helpers: `readLine()`, `readChunkedBody()`, `copyBytes()`. Defines sentinel errors (`ErrMalformedRequestLine`, `ErrMalformedStatusLine`, `ErrMalformedChunkLength`, `ErrMalformedContentLength`).
 5. **`accessors.go`**: Getter methods for parsed Request/Response fields. Request: `Method()`, `Host()`, `Path()`, `Version()`, `Header()`, `ContentLength()`, `IsChunked()`, `Body()`. Response: `Header()`. Serialization: `Request.WriteTo()` (absolute-URI form), `Request.WriteOriginForm()` (origin form), `Response.WriteTo()`.
 6. **`pool.go`**: `ConnPool` for per-host idle connections. Uses LIFO retrieval and auto-cleanup.
-7. **`proxy.go`**: HTTP/HTTPS CONNECT proxy dialer. Implements `golang.org/x/net/proxy.Dialer`.
+7. **`proxy.go`**: HTTP/HTTPS CONNECT proxy dialer. Implements `golang.org/x/net/proxy.Dialer`. Uses raw byte CONNECT handshake (no `net/http`).
 8. **`testdata/`**: Contains raw request fixtures (`req1.txt`, etc.) and `client_test.go` helpers.
 ## Key Types
 
@@ -52,12 +52,11 @@ type Request struct {
     URI      *url.URL
     IP       string
     // parsed fields (unexported): httpLine, method, path, version, rawHeaders, body
-    headers  map[string]HeaderLine
+    headers  []HeaderLine
 }
 
 type HeaderLine struct {
     Key, Value []byte
-    Pos        int
 }
 
 type Response struct {
@@ -108,11 +107,13 @@ func (obj *Response) WriteTo(w io.Writer) (int64, error)
 - **Error Handling**: Wrap errors with context using `fmt.Errorf("context: %w", err)`. Define sentinel errors as package variables.
 - **Comments**: Use `//` single-line comments before exported functions and types.
 
-## Backlog
+## Completed Backlog
 
-1. **Custom Response Parser in `ParseRawdata()`**: Replace `http.ReadResponse` in `response.go:80` with a custom parser to prevent `net/http` from canonicalizing headers when parsing stored response bytes.
-2. **Ordered Headers**: Migrate from `map[string]HeaderLine` to a slice-based approach (`[]HeaderLine`) to handle duplicates and ordering natively without the `key_N` suffix hack.
-3. **Proxy Refactor**: Replace `net/http` usage in `proxy.go` for CONNECT handshakes.
+1. ~~**Custom Response Parser in `ParseRawdata()`**~~: ✅ Replaced `http.ReadResponse` with custom `ReadResponse()` from `read.go`. No `net/http` dependency.
+2. ~~**Ordered Headers**~~: ✅ Migrated from `map[string]HeaderLine` to `[]HeaderLine`. Duplicates and ordering handled natively. Removed `key_N` suffix hack and `Pos` field.
+3. ~~**Proxy Refactor**~~: ✅ Replaced `net/http` in `proxy.go` CONNECT handshake with raw byte operations.
+
+**`net/http` is no longer used anywhere in rawhttp** — not in production code, not in proxy, not in response parsing.
 
 ## Dependencies
 

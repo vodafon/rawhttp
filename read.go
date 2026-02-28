@@ -49,7 +49,7 @@ func ReadRequest(br *bufio.Reader) (*Request, error) {
 	copy(version, parts[2])
 
 	// Read headers
-	headers := make(map[string]HeaderLine)
+	var headers []HeaderLine
 	var rawHeadersBuf bytes.Buffer
 	var contentLength int64 = -1
 	var isChunked bool
@@ -88,16 +88,10 @@ func ReadRequest(br *bufio.Reader) (*Request, error) {
 			v = bytes.TrimSpace(trimmed[colonIdx+1:])
 		}
 
-		key := strings.ToLower(string(k))
-		_, ok := headers[key]
-		if ok {
-			key = fmt.Sprintf("%s_%d", key, pos)
-		}
-		headers[key] = HeaderLine{
-			Pos:   pos,
+		headers = append(headers, HeaderLine{
 			Key:   copyBytes(k),
 			Value: copyBytes(v),
-		}
+		})
 
 		// Track content-length and transfer-encoding
 		lowerKey := strings.ToLower(string(k))

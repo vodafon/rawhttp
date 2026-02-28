@@ -16,7 +16,7 @@ func (obj *Request) Method() string {
 // Host returns the Host header value.
 func (obj *Request) Host() string {
 	obj.ParseRawdata()
-	hl, ok := obj.headers["host"]
+	hl, ok := findHeader(obj.headers, "host")
 	if !ok {
 		return ""
 	}
@@ -39,7 +39,7 @@ func (obj *Request) Version() string {
 // Returns empty string if not found.
 func (obj *Request) Header(key string) string {
 	obj.ParseRawdata()
-	hl, ok := obj.headers[strings.ToLower(key)]
+	hl, ok := findHeader(obj.headers, key)
 	if !ok {
 		return ""
 	}
@@ -50,7 +50,7 @@ func (obj *Request) Header(key string) string {
 // Returns -1 if not present or invalid.
 func (obj *Request) ContentLength() int {
 	obj.ParseRawdata()
-	hl, ok := obj.headers["content-length"]
+	hl, ok := findHeader(obj.headers, "content-length")
 	if !ok {
 		return -1
 	}
@@ -64,7 +64,7 @@ func (obj *Request) ContentLength() int {
 // IsChunked returns true if Transfer-Encoding includes "chunked".
 func (obj *Request) IsChunked() bool {
 	obj.ParseRawdata()
-	hl, ok := obj.headers["transfer-encoding"]
+	hl, ok := findHeader(obj.headers, "transfer-encoding")
 	if !ok {
 		return false
 	}

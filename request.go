@@ -23,12 +23,11 @@ type Request struct {
 	version    []byte
 	rawHeaders []byte
 	body       []byte
-	headers    map[string]HeaderLine
+	headers    []HeaderLine
 }
 
 type HeaderLine struct {
 	Key, Value []byte
-	Pos        int
 }
 
 func (obj *Request) SetRawdata(rd []byte) error {
@@ -93,49 +92,48 @@ func (obj *Request) ParseRawdata() error {
 	obj.version = hlinePieces[2]
 
 	obj.rawHeaders = bytes.Join(headers[1:], []byte("\r\n"))
-	obj.headers = make(map[string]HeaderLine)
+	obj.headers = nil
 
-	for i, line := range headers[1:] {
+	for _, line := range headers[1:] {
 		linePieces := bytes.Split(line, []byte(":"))
 		k := linePieces[0]
 		v := []byte{}
 		if len(linePieces) > 1 {
 			v = bytes.TrimSpace(bytes.Join(linePieces[1:], []byte(":")))
 		}
-		key := strings.ToLower(string(k))
-		_, ok := obj.headers[key]
-		if ok {
-			key = fmt.Sprintf("%s_%d", key, i)
-		}
-		obj.headers[key] = HeaderLine{
-			Pos:   i,
+		obj.headers = append(obj.headers, HeaderLine{
 			Key:   k,
 			Value: v,
-		}
+		})
 	}
 	obj.parsed = true
 	return nil
 }
 
 func (obj *Request) SetHeader(key string, name, value []byte) {
-	hl, ok := obj.headers[key]
-	if !ok {
-		hl.Pos = len(obj.headers)
+	lowerKey := strings.ToLower(key)
+	for i, hl := range obj.headers {
+		if strings.ToLower(string(hl.Key)) == lowerKey {
+			obj.headers[i].Key = name
+			obj.headers[i].Value = value
+			return
+		}
 	}
-	hl.Key = name
-	hl.Value = value
-	obj.headers[key] = hl
+	obj.headers = append(obj.headers, HeaderLine{
+		Key:   name,
+		Value: value,
+	})
 }
 
 func (obj *Request) Bytes() []byte {
 	headerSlice := make([][]byte, len(obj.headers))
 
-	for _, v := range obj.headers {
+	for i, v := range obj.headers {
 		var hbuf bytes.Buffer
 		hbuf.Write(v.Key)
 		hbuf.Write([]byte(": "))
 		hbuf.Write(v.Value)
-		headerSlice[v.Pos] = hbuf.Bytes()
+		headerSlice[i] = hbuf.Bytes()
 	}
 	headers := bytes.Join(headerSlice, []byte("\r\n"))
 
@@ -195,7 +193,7 @@ func (obj *Request) WantsUpgrade() bool {
 // For example: "Connection: host, close, proxy" contains "close" but not "clos"
 // Hyphens and underscores are allowed as part of values
 func (obj *Request) headerHasValue(header string, value string) bool {
-	hl, ok := obj.headers[header]
+	hl, ok := findHeader(obj.headers, header)
 	if !ok || string(hl.Value) == "" {
 		return false
 	}
@@ -304,10 +302,10 @@ func PrepareRequest(req *Request) {
 	req.path = prepareBytes(req.path, req)
 	req.version = prepareBytes(req.version, req)
 	req.body = prepareBytes(req.body, req)
-	for k, v := range req.headers {
+	for i, v := range req.headers {
 		v.Key = prepareBytes(v.Key, req)
 		v.Value = prepareBytes(v.Value, req)
-		req.headers[k] = v
+		req.headers[i] = v
 	}
 	PrepareRequestVariables(req)
 }
@@ -328,10 +326,10 @@ func PrepareRequestVariables(req *Request) {
 	req.method = prepareBytesVariables(req.method, req)
 	req.path = prepareBytesVariables(req.path, req)
 	req.version = prepareBytesVariables(req.version, req)
-	for k, v := range req.headers {
+	for i, v := range req.headers {
 		v.Key = prepareBytesVariables(v.Key, req)
 		v.Value = prepareBytesVariables(v.Value, req)
-		req.headers[k] = v
+		req.headers[i] = v
 	}
 }
 
@@ -358,4 +356,16 @@ func ContentLengthCalculation(req *Request) {
 	}
 	l := len(bytes.Join(parts[1:], []byte("\r\n\r\n")))
 	req.Rawdata = bytes.ReplaceAll(req.Rawdata, []byte("||CLEN||"), []byte(fmt.Sprintf("%d", l)))
+}
+
+
+// findHeader returns the first header matching the given key (case-insensitive).
+func findHeader(headers []HeaderLine, key string) (HeaderLine, bool) {
+	lowerKey := strings.ToLower(key)
+	for _, hl := range headers {
+		if strings.ToLower(string(hl.Key)) == lowerKey {
+			return hl, true
+		}
+	}
+	return HeaderLine{}, false
 }

@@ -3,6 +3,7 @@ package rawhttp
 import (
 	"bytes"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -129,7 +130,7 @@ func TestParseRawdata_Headers(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		hl, ok := req.headers[tt.key]
+		hl, ok := findHeader(req.headers, tt.key)
 		if !ok {
 			t.Errorf("header %q not found", tt.key)
 			continue
@@ -149,14 +150,22 @@ func TestParseRawdata_DuplicateHeaders(t *testing.T) {
 		t.Fatalf("ParseRawdata() error: %v", err)
 	}
 
-	// First cookie header should be at "cookie"
-	if _, ok := req.headers["cookie"]; !ok {
-		t.Error("first cookie header not found at 'cookie'")
+	// Count Cookie headers in slice
+	var cookieHeaders []HeaderLine
+	for _, hl := range req.headers {
+		if strings.ToLower(string(hl.Key)) == "cookie" {
+			cookieHeaders = append(cookieHeaders, hl)
+		}
 	}
 
-	// Second cookie header should be at "cookie_2" (index-based suffix)
-	if _, ok := req.headers["cookie_2"]; !ok {
-		t.Error("second cookie header not found at 'cookie_2'")
+	if len(cookieHeaders) != 2 {
+		t.Fatalf("expected 2 cookie headers, got %d", len(cookieHeaders))
+	}
+	if string(cookieHeaders[0].Value) != "a=1" {
+		t.Errorf("first cookie = %q, want %q", cookieHeaders[0].Value, "a=1")
+	}
+	if string(cookieHeaders[1].Value) != "b=2" {
+		t.Errorf("second cookie = %q, want %q", cookieHeaders[1].Value, "b=2")
 	}
 }
 
@@ -196,7 +205,7 @@ func TestParseRawdata_HeaderWithColonInValue(t *testing.T) {
 		t.Fatalf("ParseRawdata() error: %v", err)
 	}
 
-	hl, ok := req.headers["x-url"]
+	hl, ok := findHeader(req.headers, "x-url")
 	if !ok {
 		t.Fatal("x-url header not found")
 	}
@@ -240,13 +249,15 @@ func TestSetHeader(t *testing.T) {
 
 	// Update existing header
 	req.SetHeader("host", []byte("Host"), []byte("newhost.com"))
-	if string(req.headers["host"].Value) != "newhost.com" {
+	hl, ok := findHeader(req.headers, "host")
+	if !ok || string(hl.Value) != "newhost.com" {
 		t.Error("SetHeader failed to update existing header")
 	}
 
 	// Add new header
 	req.SetHeader("x-new", []byte("X-New"), []byte("newvalue"))
-	if string(req.headers["x-new"].Value) != "newvalue" {
+	hl, ok = findHeader(req.headers, "x-new")
+	if !ok || string(hl.Value) != "newvalue" {
 		t.Error("SetHeader failed to add new header")
 	}
 }
@@ -258,7 +269,7 @@ func TestSetConnectionClose(t *testing.T) {
 
 	req.SetConnectionClose()
 
-	hl, ok := req.headers["connection"]
+	hl, ok := findHeader(req.headers, "connection")
 	if !ok {
 		t.Fatal("connection header not found")
 	}

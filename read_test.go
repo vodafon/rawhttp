@@ -170,7 +170,7 @@ func TestReadRequest_MultipleHeaders(t *testing.T) {
 	}
 
 	for _, wh := range wantHeaders {
-		hl, ok := req.headers[wh.key]
+		hl, ok := findHeader(req.headers, wh.key)
 		if !ok {
 			t.Errorf("header %q not found", wh.key)
 			continue
@@ -189,27 +189,22 @@ func TestReadRequest_DuplicateHeaders(t *testing.T) {
 		t.Fatalf("ReadRequest() error: %v", err)
 	}
 
-	// First cookie at "cookie"
-	hl, ok := req.headers["cookie"]
-	if !ok {
-		t.Fatal("first cookie header not found at 'cookie'")
-	}
-	if string(hl.Value) != "a=1" {
-		t.Errorf("cookie value = %q, want %q", hl.Value, "a=1")
-	}
-
-	// Second cookie at "cookie_N" (suffix based on position)
-	found := false
-	for k, v := range req.headers {
-		if strings.HasPrefix(k, "cookie_") {
-			found = true
-			if string(v.Value) != "b=2" {
-				t.Errorf("duplicate cookie value = %q, want %q", v.Value, "b=2")
-			}
+	// Count Cookie headers in slice
+	var cookieHeaders []HeaderLine
+	for _, hl := range req.headers {
+		if strings.ToLower(string(hl.Key)) == "cookie" {
+			cookieHeaders = append(cookieHeaders, hl)
 		}
 	}
-	if !found {
-		t.Error("duplicate cookie header not found with cookie_N key")
+
+	if len(cookieHeaders) != 2 {
+		t.Fatalf("expected 2 cookie headers, got %d", len(cookieHeaders))
+	}
+	if string(cookieHeaders[0].Value) != "a=1" {
+		t.Errorf("first cookie = %q, want %q", cookieHeaders[0].Value, "a=1")
+	}
+	if string(cookieHeaders[1].Value) != "b=2" {
+		t.Errorf("second cookie = %q, want %q", cookieHeaders[1].Value, "b=2")
 	}
 }
 
@@ -221,8 +216,8 @@ func TestReadRequest_PreservesHeaderCase(t *testing.T) {
 		t.Fatalf("ReadRequest() error: %v", err)
 	}
 
-	// Map key is lowercase, but HeaderLine.Key preserves original case
-	hl, ok := req.headers["x-custom-header"]
+	// findHeader returns first match; Key should preserve original case
+	hl, ok := findHeader(req.headers, "x-custom-header")
 	if !ok {
 		t.Fatal("x-custom-header not found")
 	}
@@ -230,7 +225,7 @@ func TestReadRequest_PreservesHeaderCase(t *testing.T) {
 		t.Errorf("Key = %q, want %q", hl.Key, "X-Custom-Header")
 	}
 
-	hl, ok = req.headers["content-type"]
+	hl, ok = findHeader(req.headers, "content-type")
 	if !ok {
 		t.Fatal("content-type not found")
 	}
@@ -249,22 +244,21 @@ func TestReadRequest_HeaderOrder(t *testing.T) {
 
 	expectedOrder := []struct {
 		key string
-		pos int
+		idx int
 	}{
-		{"host", 0},
-		{"alpha", 1},
-		{"beta", 2},
-		{"gamma", 3},
+		{"Host", 0},
+		{"Alpha", 1},
+		{"Beta", 2},
+		{"Gamma", 3},
 	}
 
 	for _, eo := range expectedOrder {
-		hl, ok := req.headers[eo.key]
-		if !ok {
-			t.Errorf("header %q not found", eo.key)
+		if eo.idx >= len(req.headers) {
+			t.Errorf("header index %d out of range (len=%d)", eo.idx, len(req.headers))
 			continue
 		}
-		if hl.Pos != eo.pos {
-			t.Errorf("header[%q].Pos = %d, want %d", eo.key, hl.Pos, eo.pos)
+		if string(req.headers[eo.idx].Key) != eo.key {
+			t.Errorf("headers[%d].Key = %q, want %q", eo.idx, req.headers[eo.idx].Key, eo.key)
 		}
 	}
 }
