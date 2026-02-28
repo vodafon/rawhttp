@@ -2,11 +2,13 @@ package rawhttp
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -75,40 +77,29 @@ func (s *httpProxy) Dial(network, addr string) (net.Conn, error) {
 		return nil, err
 	}
 
-	reqURL, err := url.Parse("https://" + addr)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	reqURL.Scheme = ""
-
-	req, err := http.NewRequest("CONNECT", reqURL.String(), nil)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	req.Close = false
+	// Write CONNECT request directly
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
 	if s.haveAuth {
-		req.SetBasicAuth(s.username, s.password)
+		creds := base64.StdEncoding.EncodeToString([]byte(s.username + ":" + s.password))
+		connectReq += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", creds)
 	}
-	req.Header.Set("User-Agent", "rawhttp.0.1")
+	connectReq += "User-Agent: rawhttp.0.1\r\n\r\n"
 
-	err = req.Write(c)
+	_, err = fmt.Fprint(c, connectReq)
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
 
 	br := bufio.NewReader(c)
-	resp, err := http.ReadResponse(br, req)
+	statusCode, err := readConnectResponse(br)
 	if err != nil {
 		c.Close()
 		return nil, err
 	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if statusCode != 200 {
 		c.Close()
-		err = fmt.Errorf("Connect server using proxy error, StatusCode [%d]", resp.StatusCode)
+		err = fmt.Errorf("Connect server using proxy error, StatusCode [%d]", statusCode)
 		return nil, err
 	}
 
@@ -117,4 +108,39 @@ func (s *httpProxy) Dial(network, addr string) (net.Conn, error) {
 
 func ProxyFromURL(u *url.URL, forward proxy.Dialer) (proxy.Dialer, error) {
 	return proxy.FromURL(u, forward)
+}
+
+// readConnectResponse reads a CONNECT tunnel response (status line + headers only).
+// CONNECT responses have no body per RFC 7231 Section 4.3.6, so we must not
+// read beyond the header terminator to avoid consuming tunnel data.
+func readConnectResponse(br *bufio.Reader) (int, error) {
+	// Read status line
+	statusLine, err := br.ReadBytes('\n')
+	if err != nil {
+		return 0, fmt.Errorf("reading status line: %w", err)
+	}
+
+	// Parse status code from "HTTP/1.1 200 ..."-style line
+	trimmed := bytes.TrimRight(statusLine, "\r\n")
+	parts := bytes.SplitN(trimmed, []byte(" "), 3)
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("malformed status line: %q", trimmed)
+	}
+	code, err := strconv.Atoi(string(parts[1]))
+	if err != nil {
+		return 0, fmt.Errorf("invalid status code: %q", parts[1])
+	}
+
+	// Read headers until empty line
+	for {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			return 0, fmt.Errorf("reading header: %w", err)
+		}
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			break
+		}
+	}
+
+	return code, nil
 }
