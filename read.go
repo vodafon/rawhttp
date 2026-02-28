@@ -306,12 +306,18 @@ func readChunkedBody(br *bufio.Reader, rawBuf *bytes.Buffer) ([]byte, error) {
 		}
 
 		if size == 0 {
-			// Read trailing \r\n after last chunk
-			trailer, err := readLine(br)
-			if err != nil && err != io.EOF {
-				return nil, fmt.Errorf("reading chunk trailer: %w", err)
+			// Read trailers (multiple header lines) until empty line
+			for {
+				trailerLine, err := readLine(br)
+				if err != nil && err != io.EOF {
+					return nil, fmt.Errorf("reading chunk trailer: %w", err)
+				}
+				rawBuf.Write(trailerLine)
+				// Empty line (just \r\n) signals end of trailers
+				if bytes.Equal(trailerLine, []byte("\r\n")) {
+					break
+				}
 			}
-			rawBuf.Write(trailer)
 			break
 		}
 

@@ -950,3 +950,69 @@ func TestWriteOriginForm_NoURI(t *testing.T) {
 		t.Errorf("WriteOriginForm() output = %q, want prefix \"GET /fallback HTTP/1.1\\r\\n\"", output)
 	}
 }
+
+func TestChunkedTrailer(t *testing.T) {
+	// Test reading chunked body with multiple trailer headers
+	// RFC 9112 §7.1.2: trailers are header lines after the zero-size chunk,
+	// terminated by an empty line
+	input := "POST /upload HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"\r\n" +
+		"5\r\n" +
+		"hello\r\n" +
+		"0\r\n" +
+		"X-Trailer-1: value1\r\n" +
+		"X-Trailer-2: value2\r\n" +
+		"\r\n"
+
+	br := bufio.NewReader(strings.NewReader(input))
+	req, err := ReadRequest(br)
+	if err != nil {
+		t.Fatalf("ReadRequest() error: %v", err)
+	}
+
+	// Body should only contain "hello", not trailers
+	if string(req.body) != "hello" {
+		t.Errorf("body = %q, want %q", req.body, "hello")
+	}
+
+	// Rawdata should preserve entire chunked encoding including trailers
+	if !bytes.Contains(req.Rawdata, []byte("X-Trailer-1: value1")) {
+		t.Errorf("Rawdata should contain trailer header, got %q", req.Rawdata)
+	}
+	if !bytes.Contains(req.Rawdata, []byte("X-Trailer-2: value2")) {
+		t.Errorf("Rawdata should contain trailer header, got %q", req.Rawdata)
+	}
+}
+
+func TestChunkedTrailerMultipleChunks(t *testing.T) {
+	// Test reading chunked body with multiple chunks and trailers
+	input := "POST /upload HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"\r\n" +
+		"5\r\n" +
+		"hello\r\n" +
+		"6\r\n" +
+		" world\r\n" +
+		"0\r\n" +
+		"X-Custom: trailer\r\n" +
+		"\r\n"
+
+	br := bufio.NewReader(strings.NewReader(input))
+	req, err := ReadRequest(br)
+	if err != nil {
+		t.Fatalf("ReadRequest() error: %v", err)
+	}
+
+	// Body should be concatenation of chunks
+	if string(req.body) != "hello world" {
+		t.Errorf("body = %q, want %q", req.body, "hello world")
+	}
+
+	// Rawdata should preserve trailer
+	if !bytes.Contains(req.Rawdata, []byte("X-Custom: trailer")) {
+		t.Errorf("Rawdata should contain trailer, got %q", req.Rawdata)
+	}
+}
