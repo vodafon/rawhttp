@@ -91,7 +91,7 @@ func (obj *Response) ParseRawdata() error {
 	case "gzip":
 		gzReader, err := gzip.NewReader(bytes.NewReader(resp.body))
 		if err != nil {
-			panic(err)
+			return err
 		}
 		defer gzReader.Close()
 		bodyReader = gzReader

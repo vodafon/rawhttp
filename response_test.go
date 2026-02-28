@@ -385,3 +385,54 @@ func TestResponse_Header_EmptyPreBody(t *testing.T) {
 		t.Errorf("Header() on empty preBody = %q, want empty string", got)
 	}
 }
+
+func TestResponse_GzipInvalidData(t *testing.T) {
+	// Create response with gzip header but invalid gzip data
+	var rawResp bytes.Buffer
+	rawResp.WriteString("HTTP/1.1 200 OK\r\n")
+	rawResp.WriteString("Content-Encoding: gzip\r\n")
+	rawResp.WriteString("Content-Length: 10\r\n\r\n")
+	rawResp.WriteString("invalid gz") // Not valid gzip data
+
+	resp := &Response{Rawdata: rawResp.Bytes()}
+
+	// Should return error, not panic
+	err := resp.ParseRawdata()
+	if err == nil {
+		t.Error("ParseRawdata() expected error for invalid gzip data, got nil")
+	}
+}
+
+func TestResponse_BrotliInvalidData(t *testing.T) {
+	// Create response with brotli header but invalid brotli data
+	var rawResp bytes.Buffer
+	rawResp.WriteString("HTTP/1.1 200 OK\r\n")
+	rawResp.WriteString("Content-Encoding: br\r\n")
+	rawResp.WriteString("Content-Length: 10\r\n\r\n")
+	rawResp.WriteString("invalid br") // Not valid brotli data
+
+	resp := &Response{Rawdata: rawResp.Bytes()}
+
+	// Should return error, not panic
+	err := resp.ParseRawdata()
+	if err == nil {
+		t.Error("ParseRawdata() expected error for invalid brotli data, got nil")
+	}
+}
+
+func TestResponse_DeflateInvalidData(t *testing.T) {
+	// Create response with deflate header but invalid deflate data
+	var rawResp bytes.Buffer
+	rawResp.WriteString("HTTP/1.1 200 OK\r\n")
+	rawResp.WriteString("Content-Encoding: deflate\r\n")
+	rawResp.WriteString("Content-Length: 10\r\n\r\n")
+	rawResp.WriteString("invalid df") // Not valid deflate data
+
+	resp := &Response{Rawdata: rawResp.Bytes()}
+
+	// Should return error, not panic
+	err := resp.ParseRawdata()
+	if err == nil {
+		t.Error("ParseRawdata() expected error for invalid deflate data, got nil")
+	}
+}
