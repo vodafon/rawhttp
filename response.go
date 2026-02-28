@@ -6,7 +6,6 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -74,38 +73,38 @@ func (obj *Response) ParseRawdata() error {
 		return nil
 	}
 
-	parts := bytes.SplitN(obj.Rawdata, []byte("\r\n\r\n"), 2)
-	obj.preBody = parts[0]
-
-	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewBuffer(obj.Rawdata)), &http.Request{})
+	resp, err := ReadResponse(bufio.NewReader(bytes.NewReader(obj.Rawdata)))
 	if err != nil {
 		return err
 	}
 
-	var bodyReader io.Reader = resp.Body
+	obj.httpLine = resp.httpLine
+	obj.statusCode = resp.statusCode
+	obj.preBody = resp.preBody
+
+	// ReadResponse preserves raw compressed bytes in body.
+	// Decompress based on Content-Encoding header.
+	var bodyReader io.Reader = bytes.NewReader(resp.body)
 
 	// Handle different compression types
-	switch resp.Header.Get("Content-Encoding") {
+	switch strings.ToLower(resp.Header("Content-Encoding")) {
 	case "gzip":
-		gzReader, err := gzip.NewReader(resp.Body)
+		gzReader, err := gzip.NewReader(bytes.NewReader(resp.body))
 		if err != nil {
 			panic(err)
 		}
 		defer gzReader.Close()
 		bodyReader = gzReader
 	case "br":
-		bodyReader = brotli.NewReader(resp.Body)
+		bodyReader = brotli.NewReader(bytes.NewReader(resp.body))
 	case "deflate":
-		bodyReader = flate.NewReader(resp.Body)
+		bodyReader = flate.NewReader(bytes.NewReader(resp.body))
 	}
 
 	obj.body, err = io.ReadAll(bodyReader)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	obj.statusCode = resp.StatusCode
 
 	obj.parsed = true
 
