@@ -125,6 +125,30 @@ func (obj *Request) SetHeader(key string, name, value []byte) {
 	})
 }
 
+// RemoveHeader removes all headers matching the given key (case-insensitive).
+// After removal, Rawdata is set to nil so subsequent WriteTo() uses Bytes() reconstruction.
+func (obj *Request) RemoveHeader(key string) {
+	obj.ParseRawdata()
+	lowerKey := strings.ToLower(key)
+	// Filter headers: keep those that don't match the key
+	filtered := make([]HeaderLine, 0, len(obj.headers))
+	for _, hl := range obj.headers {
+		if strings.ToLower(string(hl.Key)) != lowerKey {
+			filtered = append(filtered, hl)
+		}
+	}
+	obj.headers = filtered
+	obj.Rawdata = nil
+}
+
+// ConstrainAcceptEncoding sets the Accept-Encoding header to only gzip, deflate, and br.
+// These are the encodings rawhttp can decompress. If Accept-Encoding exists, it is replaced.
+// If it doesn't exist, it is added.
+func (obj *Request) ConstrainAcceptEncoding() {
+	obj.SetHeader("accept-encoding", []byte("Accept-Encoding"), []byte("gzip, deflate, br"))
+	obj.Rawdata = nil
+}
+
 func (obj *Request) Bytes() []byte {
 	headerSlice := make([][]byte, len(obj.headers))
 

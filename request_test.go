@@ -263,6 +263,139 @@ func TestSetHeader(t *testing.T) {
 	}
 }
 
+func TestRequest_RemoveHeader(t *testing.T) {
+tests := []struct {
+		name    string
+		rawdata string
+		key     string
+	}{
+		{
+			name:    "remove existing header",
+			rawdata: "GET / HTTP/1.1\r\nHost: example.com\r\nX-Test: value\r\n\r\n",
+			key:     "x-test",
+		},
+		{
+			name:    "case-insensitive removal",
+			rawdata: "GET / HTTP/1.1\r\nHost: example.com\r\nX-Test: value\r\n\r\n",
+			key:     "X-TEST",
+		},
+		{
+			name:    "remove nonexistent header",
+			rawdata: "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			key:     "x-missing",
+		},
+		{
+			name:    "remove one of duplicate headers",
+			rawdata: "GET / HTTP/1.1\r\nHost: example.com\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n",
+			key:     "cookie",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &Request{Rawdata: []byte(tt.rawdata)}
+			req.ParseRawdata()
+			
+			// Call RemoveHeader
+			req.RemoveHeader(tt.key)
+			
+			// After RemoveHeader, the key should not be found
+			_, ok := findHeader(req.headers, tt.key)
+			if ok {
+				t.Errorf("RemoveHeader(%q) failed: header still present after removal", tt.key)
+			}
+			
+			// For duplicate headers test: verify all were removed
+			if tt.name == "remove one of duplicate headers" {
+				var foundCookies int
+				for _, hl := range req.headers {
+					if strings.ToLower(string(hl.Key)) == "cookie" {
+						foundCookies++
+					}
+				}
+				if foundCookies != 0 {
+					t.Errorf("expected 0 cookie headers after removal, got %d", foundCookies)
+				}
+			}
+			
+			// Verify Rawdata is nil
+			if len(req.Rawdata) != 0 {
+				t.Error("RemoveHeader should set Rawdata to nil")
+			}
+			
+			// Verify WriteTo() still works after removal
+			var buf bytes.Buffer
+			_, err := req.WriteTo(&buf)
+			if err != nil {
+				t.Errorf("WriteTo() after RemoveHeader failed: %v", err)
+			}
+			if buf.Len() == 0 {
+				t.Error("WriteTo() after RemoveHeader produced no output")
+			}
+		})
+		}
+	}
+
+func TestRequest_ConstrainAcceptEncoding(t *testing.T) {
+	tests := []struct {
+		name         string
+		rawdata      string
+		wantValue    string
+		wantErr      bool
+	}{
+		{
+			name:      "replace existing accept-encoding",
+			rawdata:   "GET / HTTP/1.1\r\nHost: example.com\r\nAccept-Encoding: gzip\r\n\r\n",
+			wantValue: "gzip, deflate, br",
+			wantErr:  false,
+		},
+		{
+			name:      "add accept-encoding when missing",
+			rawdata:   "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+			wantValue: "gzip, deflate, br",
+			wantErr:  false,
+		},
+		{
+			name:      "case-insensitive header replacement",
+			rawdata:   "GET / HTTP/1.1\r\nHost: example.com\r\naccept-encoding: deflate\r\n\r\n",
+			wantValue: "gzip, deflate, br",
+			wantErr:  false,
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &Request{Rawdata: []byte(tt.rawdata)}
+			req.ParseRawdata()
+			
+			req.ConstrainAcceptEncoding()
+			
+			// Check that Accept-Encoding was set correctly
+			value := req.Header("accept-encoding")
+			if value != tt.wantValue {
+				t.Errorf("Accept-Encoding header = %q, want %q", value, tt.wantValue)
+			}
+			
+			// Verify WriteTo() produces valid HTTP after modification
+			var buf bytes.Buffer
+			_, err := req.WriteTo(&buf)
+			if err != nil {
+				t.Errorf("WriteTo() after ConstrainAcceptEncoding failed: %v", err)
+			}
+			if buf.Len() == 0 {
+				t.Error("WriteTo() after ConstrainAcceptEncoding produced no output")
+			}
+			
+			// Verify output contains the Accept-Encoding header
+			output := buf.String()
+			if !strings.Contains(output, "Accept-Encoding: gzip, deflate, br") {
+				t.Errorf("WriteTo() output missing 'Accept-Encoding: gzip, deflate, br'\nGot: %s", output)
+			}
+		})
+		}
+	}
+
+
 func TestSetConnectionClose(t *testing.T) {
 	rawdata := "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n"
 	req := &Request{Rawdata: []byte(rawdata)}
