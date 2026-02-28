@@ -1,9 +1,20 @@
 package rawhttp
 
 import (
+	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -319,3 +330,706 @@ func (e *timeoutError) Temporary() bool { return true }
 
 // Verify timeoutError implements net.Error
 var _ net.Error = (*timeoutError)(nil)
+
+// simpleTestRequest creates a minimal request for testing doConnInternal/DoConn.
+// TransformRequestFunc is set to a no-op so it doesn't dereference URI.
+func simpleTestRequest(rawdata string) *Request {
+	req := &Request{Rawdata: []byte(rawdata)}
+	req.ParseRawdata()
+	return req
+}
+
+func TestDoConnInternal_Success(t *testing.T) {
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	// Server goroutine: read request, write response, close
+	go func() {
+		br := bufio.NewReader(serverConn)
+		// Drain the request
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		// Write response
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	if !strings.Contains(string(resp.Rawdata), "200 OK") {
+		t.Errorf("resp.Rawdata = %q, want to contain '200 OK'", resp.Rawdata)
+	}
+	if resp.TimeToFirstByte == 0 {
+		t.Error("TimeToFirstByte should be > 0")
+	}
+	if resp.TimeToLastByte == 0 {
+		t.Error("TimeToLastByte should be > 0")
+	}
+}
+
+func TestDoConnInternal_WriteError(t *testing.T) {
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	serverConn.Close()
+	clientConn.Close()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err == nil {
+		t.Error("doConnInternal() expected error on closed conn, got nil")
+	}
+}
+
+func TestDoConnInternal_EOF(t *testing.T) {
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+
+	// Server reads request then closes without writing response
+	go func() {
+		buf := make([]byte, 4096)
+		serverConn.Read(buf)
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != io.EOF {
+		t.Errorf("doConnInternal() error = %v, want io.EOF", err)
+	}
+	clientConn.Close()
+}
+
+func TestDoConnInternal_QuietTimeout(t *testing.T) {
+	// Test the QuietTimeout=0 default path
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         0, // should use DefaultQuietTimeout
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		serverConn.Read(buf)
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "ok") {
+		t.Errorf("resp.Rawdata should contain 'ok', got %q", resp.Rawdata)
+	}
+}
+
+func TestDoConn(t *testing.T) {
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+
+	go func() {
+		buf := make([]byte, 4096)
+		serverConn.Read(buf)
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.DoConn(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("DoConn() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "done") {
+		t.Errorf("resp.Rawdata should contain 'done', got %q", resp.Rawdata)
+	}
+}
+
+func TestDoConnWithPool_ReusableConnection(t *testing.T) {
+	pool := NewDefaultConnPool()
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+		pool:                 pool,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	poolKey := "http://example.com:80"
+
+	// Server: read request, write keep-alive response, then keep conn open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"))
+		// Keep connection open for pooling
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnWithPool(clientConn, req, resp, poolKey)
+	if err != nil {
+		t.Fatalf("doConnWithPool() error: %v", err)
+	}
+
+	// Connection should be returned to pool
+	if pool.LenForHost(poolKey) != 1 {
+		t.Errorf("pool.LenForHost(%q) = %d, want 1", poolKey, pool.LenForHost(poolKey))
+	}
+
+	pool.CloseAll()
+	serverConn.Close()
+}
+
+func TestDoConnWithPool_ConnectionClose(t *testing.T) {
+	pool := NewDefaultConnPool()
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+		pool:                 pool,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	poolKey := "http://example.com:80"
+
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnWithPool(clientConn, req, resp, poolKey)
+	if err != nil {
+		t.Fatalf("doConnWithPool() error: %v", err)
+	}
+
+	// Connection should NOT be in pool (Connection: close)
+	if pool.LenForHost(poolKey) != 0 {
+		t.Errorf("pool.LenForHost(%q) = %d, want 0", poolKey, pool.LenForHost(poolKey))
+	}
+
+	pool.CloseAll()
+}
+
+func TestDoConnWithPool_DisableKeepAlive(t *testing.T) {
+	pool := NewDefaultConnPool()
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+		pool:                 pool,
+		DisableKeepAlive:     true,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	poolKey := "http://example.com:80"
+
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnWithPool(clientConn, req, resp, poolKey)
+	if err != nil {
+		t.Fatalf("doConnWithPool() error: %v", err)
+	}
+
+	// Connection should NOT be pooled when DisableKeepAlive=true
+	if pool.LenForHost(poolKey) != 0 {
+		t.Errorf("pool.LenForHost(%q) = %d, want 0", poolKey, pool.LenForHost(poolKey))
+	}
+
+	pool.CloseAll()
+}
+
+// startHTTPListener starts a local TCP listener that responds with a fixed HTTP response.
+// Returns the listener address and a cleanup function.
+func startHTTPListener(t *testing.T, response string) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen error: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				br := bufio.NewReader(c)
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil || strings.TrimSpace(line) == "" {
+						break
+					}
+				}
+				c.Write([]byte(response))
+				c.Close()
+			}(conn)
+		}
+	}()
+
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func TestDoHTTP_Success(t *testing.T) {
+	addr, cleanup := startHTTPListener(t, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+	defer cleanup()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	u, _ := url.Parse("http://" + addr + "/test")
+	req, _ := NewBaseRequest(u.String())
+	resp := NewResponse()
+
+	err := client.DoHTTP(req, resp)
+	if err != nil {
+		t.Fatalf("DoHTTP() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "hello") {
+		t.Errorf("resp.Rawdata should contain 'hello', got %q", resp.Rawdata)
+	}
+}
+
+func TestDoHTTP_DefaultPort(t *testing.T) {
+	// Test that DoHTTP fills in port 80 when not specified
+	client := NewDefaultClientTimeout(500 * time.Millisecond)
+	defer client.Close()
+
+	// This will fail to connect but exercises the default port path
+	u, _ := url.Parse("http://127.0.0.1/test")
+	req := &Request{
+		Rawdata: []byte("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+		URL:     u.String(),
+		URI:     u,
+	}
+	req.ParseRawdata()
+	PrepareRequest(req)
+	resp := NewResponse()
+
+	err := client.DoHTTP(req, resp)
+	// Expected to fail connecting since nothing is on port 80
+	if err == nil {
+		t.Error("DoHTTP() to non-listening port should error")
+	}
+}
+
+// generateSelfSignedCert creates a self-signed TLS certificate for testing.
+func generateSelfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyBytes, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("load cert: %v", err)
+	}
+	return cert
+}
+
+func startTLSListener(t *testing.T, response string) (string, func()) {
+	t.Helper()
+	cert := generateSelfSignedCert(t)
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	if err != nil {
+		t.Fatalf("tls.Listen error: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				br := bufio.NewReader(c)
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil || strings.TrimSpace(line) == "" {
+						break
+					}
+				}
+				c.Write([]byte(response))
+				c.Close()
+			}(conn)
+		}
+	}()
+
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+func TestDoHTTPS_Success(t *testing.T) {
+	addr, cleanup := startTLSListener(t, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntls")
+	defer cleanup()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	u, _ := url.Parse("https://" + addr + "/test")
+	req, _ := NewBaseRequest(u.String())
+	resp := NewResponse()
+
+	err := client.DoHTTPS(req, resp)
+	if err != nil {
+		t.Fatalf("DoHTTPS() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "tls") {
+		t.Errorf("resp.Rawdata should contain 'tls', got %q", resp.Rawdata)
+	}
+}
+
+func TestDoHTTPS_DefaultPort(t *testing.T) {
+	client := NewDefaultClientTimeout(500 * time.Millisecond)
+	defer client.Close()
+
+	u, _ := url.Parse("https://127.0.0.1/test")
+	req := &Request{
+		Rawdata: []byte("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+		URL:     u.String(),
+		URI:     u,
+	}
+	req.ParseRawdata()
+	PrepareRequest(req)
+	resp := NewResponse()
+
+	err := client.DoHTTPS(req, resp)
+	if err == nil {
+		t.Error("DoHTTPS() to non-listening port should error")
+	}
+}
+
+func TestDoProxy_InvalidRequest(t *testing.T) {
+	client := NewDefaultClientTimeout(time.Second)
+	defer client.Close()
+
+	u, _ := url.Parse("https://example.com:443")
+	// Request without \r\n\r\n separator
+	req := &Request{
+		Rawdata: []byte("CONNECT example.com:443 HTTP/1.1"),
+		URL:     "https://example.com:443",
+		URI:     u,
+	}
+	resp := NewResponse()
+
+	err := client.DoProxy(req, resp)
+	if err != InvalidRequestError {
+		t.Errorf("DoProxy() error = %v, want InvalidRequestError", err)
+	}
+}
+
+func TestClient_httpDialer(t *testing.T) {
+	client := NewDefaultClient()
+	defer client.Close()
+
+	d := client.httpDialer()
+	if d == nil {
+		t.Fatal("httpDialer() returned nil")
+	}
+
+	// Verify it can dial a local listener
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen error: %v", err)
+	}
+	defer ln.Close()
+
+	conn, err := d.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("httpDialer.Dial() error: %v", err)
+	}
+	conn.Close()
+}
+
+func TestClient_httpsDialer(t *testing.T) {
+	client := NewDefaultClient()
+	defer client.Close()
+
+	d := client.httpsDialer()
+	if d == nil {
+		t.Fatal("httpsDialer() returned nil")
+	}
+
+	// httpsDialer does its own TLS handshake (tls.DialWithDialer),
+	// so we need a plain TCP listener that does server-side TLS on Accept.
+	cert := generateSelfSignedCert(t)
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen error: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		rawConn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		tlsConn := tls.Server(rawConn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			rawConn.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		tlsConn.Close()
+	}()
+
+	conn, err := d.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("httpsDialer.Dial() error: %v", err)
+	}
+	conn.Close()
+}
+
+func TestDoHTTP_ConnectionPooling(t *testing.T) {
+	// Start a server that keeps connections open
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen error: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				// Handle multiple requests on same connection
+				for {
+					// Read request line and headers
+					for {
+						line, err := br.ReadString('\n')
+						if err != nil {
+							return
+						}
+						if strings.TrimSpace(line) == "" {
+							break
+						}
+					}
+					c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"))
+				}
+			}(conn)
+		}
+	}()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	// Make first request
+	u, _ := url.Parse(fmt.Sprintf("http://%s/test1", ln.Addr().String()))
+	req, _ := NewBaseRequest(u.String())
+	resp := NewResponse()
+
+	err = client.DoHTTP(req, resp)
+	if err != nil {
+		t.Fatalf("first DoHTTP() error: %v", err)
+	}
+
+	// Pool should have one connection now
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "80"
+	}
+	poolKey := PoolKey("http", host, port)
+	if client.pool.LenForHost(poolKey) != 1 {
+		t.Errorf("pool should have 1 connection for %s, got %d", poolKey, client.pool.LenForHost(poolKey))
+	}
+
+	// Second request should reuse pooled connection
+	req2, _ := NewBaseRequest(u.String())
+	resp2 := NewResponse()
+	err = client.DoHTTP(req2, resp2)
+	if err != nil {
+		t.Fatalf("second DoHTTP() error: %v", err)
+	}
+	if !strings.Contains(string(resp2.Rawdata), "ok") {
+		t.Errorf("second request resp should contain 'ok', got %q", resp2.Rawdata)
+	}
+}
+
+func TestDoHTTP_StaleConnectionRetry(t *testing.T) {
+	// Start listener that accepts one request then closes
+	addr, cleanup := startHTTPListener(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+	defer cleanup()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	u, _ := url.Parse("http://" + addr + "/test")
+
+	// First request - populates pool
+	req1, _ := NewBaseRequest(u.String())
+	resp1 := NewResponse()
+	err := client.DoHTTP(req1, resp1)
+	if err != nil {
+		t.Fatalf("first DoHTTP() error: %v", err)
+	}
+
+	// The pooled connection from first request was closed by server.
+	// Second request should detect stale conn and retry with fresh one.
+	req2, _ := NewBaseRequest(u.String())
+	resp2 := NewResponse()
+	err = client.DoHTTP(req2, resp2)
+	// This should succeed with retry
+	if err != nil {
+		t.Fatalf("second DoHTTP() (retry) error: %v", err)
+	}
+}
+
+func TestClient_Do_HTTP(t *testing.T) {
+	addr, cleanup := startHTTPListener(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	defer cleanup()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	u := "http://" + addr + "/test"
+	req, _ := NewBaseRequest(u)
+	resp := NewResponse()
+
+	err := client.Do(req, resp)
+	if err != nil {
+		t.Fatalf("Do() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "ok") {
+		t.Errorf("resp should contain 'ok', got %q", resp.Rawdata)
+	}
+}
+
+func TestClient_Do_HTTPS(t *testing.T) {
+	addr, cleanup := startTLSListener(t, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntls")
+	defer cleanup()
+
+	client := NewDefaultClientTimeout(2 * time.Second)
+	defer client.Close()
+
+	u := "https://" + addr + "/test"
+	req, _ := NewBaseRequest(u)
+	resp := NewResponse()
+
+	err := client.Do(req, resp)
+	if err != nil {
+		t.Fatalf("Do() error: %v", err)
+	}
+	if !strings.Contains(string(resp.Rawdata), "tls") {
+		t.Errorf("resp should contain 'tls', got %q", resp.Rawdata)
+	}
+}
+
+func TestClient_Do_CONNECT(t *testing.T) {
+	// Test that Do routes CONNECT requests to DoProxy
+	// This will fail connecting but exercises the routing logic
+	client := NewDefaultClientTimeout(500 * time.Millisecond)
+	defer client.Close()
+
+	u, _ := url.Parse("https://127.0.0.1:9999")
+	req := &Request{
+		Rawdata: []byte("CONNECT 127.0.0.1:9999 HTTP/1.1\r\nHost: 127.0.0.1:9999\r\n\r\nextra"),
+		URL:     u.String(),
+		URI:     u,
+	}
+	req.ParseRawdata()
+	client.TransformRequestFunc(req)
+	resp := NewResponse()
+
+	// Should try DoProxy path and fail connecting
+	err := client.Do(req, resp)
+	if err == nil {
+		t.Error("Do() with CONNECT to non-listening addr should error")
+	}
+}

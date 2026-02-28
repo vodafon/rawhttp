@@ -2,6 +2,7 @@ package rawhttp
 
 import (
 	"bytes"
+	"encoding/hex"
 	"net/url"
 	"strings"
 	"testing"
@@ -701,4 +702,209 @@ func TestParsedPath(t *testing.T) {
 // Helper function for tests
 func parseTestURL(rawURL string) (*url.URL, error) {
 	return url.Parse(rawURL)
+}
+
+func TestCacheBusterParam(t *testing.T) {
+	req := &Request{path: []byte("/api")}
+	req.CacheBusterParam()
+
+	path := string(req.path)
+	if !strings.Contains(path, "?") {
+		t.Fatalf("CacheBusterParam() path missing '?', got %q", path)
+	}
+
+	// Path should be /api?XXXX=XXXX where XXXX is 4-char hex
+	parts := strings.SplitN(path, "?", 2)
+	if parts[0] != "/api" {
+		t.Errorf("base path = %q, want /api", parts[0])
+	}
+
+	kv := strings.SplitN(parts[1], "=", 2)
+	if len(kv) != 2 {
+		t.Fatalf("expected key=value param, got %q", parts[1])
+	}
+	if kv[0] != kv[1] {
+		t.Errorf("cache buster key %q != value %q", kv[0], kv[1])
+	}
+	if len(kv[0]) != 8 {
+		t.Errorf("cache buster param length = %d, want 8", len(kv[0]))
+	}
+	// Verify it's valid hex
+	_, err := hex.DecodeString(kv[0])
+	if err != nil {
+		t.Errorf("cache buster param %q is not valid hex: %v", kv[0], err)
+	}
+}
+
+func TestNewRawPathRequest(t *testing.T) {
+	req, err := NewRawPathRequest("https://example.com/original", "/custom/path")
+	if err != nil {
+		t.Fatalf("NewRawPathRequest() error: %v", err)
+	}
+
+	if req.Method() != "GET" {
+		t.Errorf("Method() = %q, want GET", req.Method())
+	}
+	if req.Path() != "/custom/path" {
+		t.Errorf("Path() = %q, want /custom/path", req.Path())
+	}
+	if req.Host() != "example.com" {
+		t.Errorf("Host() = %q, want example.com", req.Host())
+	}
+	if req.URI == nil {
+		t.Fatal("URI is nil")
+	}
+	if req.URL != "https://example.com/original" {
+		t.Errorf("URL = %q, want https://example.com/original", req.URL)
+	}
+}
+
+func TestNewRawPathRequest_InvalidURL(t *testing.T) {
+	_, err := NewRawPathRequest("://invalid", "/path")
+	if err == nil {
+		t.Error("NewRawPathRequest() with invalid URL expected error, got nil")
+	}
+}
+
+func TestFullPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		wantPath string
+	}{
+		{
+			name:     "path with query and fragment",
+			url:      "https://example.com/path?key=val#section",
+			wantPath: "/path?key=val#section",
+		},
+		{
+			name:     "path with query no fragment",
+			url:      "https://example.com/path?key=val",
+			wantPath: "/path?key=val",
+		},
+		{
+			name:     "path only",
+			url:      "https://example.com/path",
+			wantPath: "/path",
+		},
+		{
+			name:     "root path",
+			url:      "https://example.com/",
+			wantPath: "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uri, err := url.Parse(tt.url)
+			if err != nil {
+				t.Fatalf("url.Parse() error: %v", err)
+			}
+			req := &Request{URI: uri}
+
+			got := req.FullPath()
+			if got != tt.wantPath {
+				t.Errorf("FullPath() = %q, want %q", got, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestFullPath_NoFragment(t *testing.T) {
+	uri, _ := url.Parse("https://example.com/search?q=test")
+	req := &Request{URI: uri}
+
+	got := req.FullPath()
+	if got != "/search?q=test" {
+		t.Errorf("FullPath() = %q, want /search?q=test", got)
+	}
+	if strings.Contains(got, "#") {
+		t.Errorf("FullPath() should not contain '#', got %q", got)
+	}
+}
+
+func TestPrepareRequestVariables_CLEN(t *testing.T) {
+	req := &Request{
+		URL:  "https://example.com/path",
+		body: []byte("hello world"),
+	}
+	req.URI, _ = url.Parse(req.URL)
+
+	// Put ||CLEN|| in a header value
+	req.headers = []HeaderLine{
+		{Key: []byte("Content-Length"), Value: []byte("||CLEN||")},
+	}
+
+	PrepareRequestVariables(req)
+
+	// Body is 11 bytes ("hello world")
+	hl, ok := findHeader(req.headers, "content-length")
+	if !ok {
+		t.Fatal("Content-Length header not found")
+	}
+	if string(hl.Value) != "11" {
+		t.Errorf("Content-Length = %q, want \"11\"", hl.Value)
+	}
+}
+
+func TestPrepareRequestVariables_END(t *testing.T) {
+	req := &Request{
+		URL:  "https://example.com/",
+		body: []byte("keep this||END||discard this"),
+	}
+	req.URI, _ = url.Parse(req.URL)
+
+	PrepareRequestVariables(req)
+
+	if string(req.body) != "keep this" {
+		t.Errorf("body = %q, want \"keep this\"", req.body)
+	}
+}
+
+func TestPrepareRequestVariables_ESCAPEDPATH(t *testing.T) {
+	req := &Request{
+		URL:  "https://example.com/path with spaces/file",
+		body: []byte("||ESCAPEDPATH||"),
+	}
+	req.URI, _ = url.Parse(req.URL)
+
+	PrepareRequestVariables(req)
+
+	// url.URL.EscapedPath() encodes spaces as %20
+	if string(req.body) != "/path%20with%20spaces/file" {
+		t.Errorf("body = %q, want /path%%20with%%20spaces/file", req.body)
+	}
+}
+
+func TestPrepareRequestVariables_FULLPATH(t *testing.T) {
+	req := &Request{
+		URL:  "https://example.com/path?key=val#frag",
+		body: []byte("||FULLPATH||"),
+	}
+	req.URI, _ = url.Parse(req.URL)
+
+	PrepareRequestVariables(req)
+
+	// FullPath returns RequestURI + "#" + Fragment
+	expected := "/path?key=val#frag"
+	if string(req.body) != expected {
+		t.Errorf("body = %q, want %q", req.body, expected)
+	}
+}
+
+func TestClient_NewRawPathRequest(t *testing.T) {
+	client := NewDefaultClient()
+	defer client.Close()
+
+	req, err := client.NewRawPathRequest("https://example.com/original", "/custom")
+	if err != nil {
+		t.Fatalf("client.NewRawPathRequest() error: %v", err)
+	}
+
+	if req.Method() != "GET" {
+		t.Errorf("Method() = %q, want GET", req.Method())
+	}
+	if req.Path() != "/custom" {
+		t.Errorf("Path() = %q, want /custom", req.Path())
+	}
 }

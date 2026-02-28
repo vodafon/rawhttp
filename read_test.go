@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -763,5 +764,189 @@ func TestReadResponse_PreBody(t *testing.T) {
 	expectedPreBody := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5"
 	if string(resp.preBody) != expectedPreBody {
 		t.Errorf("preBody = %q, want %q", resp.preBody, expectedPreBody)
+	}
+}
+
+func TestReadRequest_MalformedContentLength(t *testing.T) {
+	input := "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Length: abc\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	_, err := ReadRequest(br)
+
+	if err == nil {
+		t.Fatal("ReadRequest() expected error for non-numeric Content-Length, got nil")
+	}
+	if !errors.Is(err, ErrMalformedContentLength) {
+		t.Errorf("error = %v, want ErrMalformedContentLength", err)
+	}
+}
+
+func TestReadResponse_MalformedStatusCode(t *testing.T) {
+	input := "HTTP/1.1 XYZ OK\r\nContent-Length: 0\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	_, err := ReadResponse(br)
+
+	if err == nil {
+		t.Fatal("ReadResponse() expected error for non-numeric status code, got nil")
+	}
+	if !errors.Is(err, ErrMalformedStatusLine) {
+		t.Errorf("error = %v, want ErrMalformedStatusLine", err)
+	}
+}
+
+func TestReadRequest_HeaderWithoutColon(t *testing.T) {
+	// Header line without colon should be parsed with key only, empty value
+	input := "GET / HTTP/1.1\r\nHost: example.com\r\nBadHeader\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	req, err := ReadRequest(br)
+	if err != nil {
+		t.Fatalf("ReadRequest() error: %v", err)
+	}
+
+	// Should have 2 headers: Host and BadHeader
+	if len(req.headers) != 2 {
+		t.Fatalf("expected 2 headers, got %d", len(req.headers))
+	}
+
+	// BadHeader should have key="BadHeader" and empty value
+	if string(req.headers[1].Key) != "BadHeader" {
+		t.Errorf("headers[1].Key = %q, want BadHeader", req.headers[1].Key)
+	}
+	if string(req.headers[1].Value) != "" {
+		t.Errorf("headers[1].Value = %q, want empty", req.headers[1].Value)
+	}
+}
+
+func TestReadResponse_NoBodyStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "1xx informational",
+			input: "HTTP/1.1 100 Continue\r\nContent-Length: 100\r\n\r\n",
+		},
+		{
+			name:  "204 No Content",
+			input: "HTTP/1.1 204 No Content\r\nContent-Length: 100\r\n\r\n",
+		},
+		{
+			name:  "304 Not Modified",
+			input: "HTTP/1.1 304 Not Modified\r\nContent-Length: 100\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			br := bufio.NewReader(strings.NewReader(tt.input))
+			resp, err := ReadResponse(br)
+			if err != nil {
+				t.Fatalf("ReadResponse() error: %v", err)
+			}
+
+			if len(resp.body) != 0 {
+				t.Errorf("body = %q, want empty (no-body status)", resp.body)
+			}
+		})
+	}
+}
+
+func TestReadResponse_ContentLengthIgnoresError(t *testing.T) {
+	// Response parser ignores parse errors for non-numeric content-length
+	// (unlike request parser which returns ErrMalformedContentLength)
+	input := "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	resp, err := ReadResponse(br)
+
+	// Should not error — response parser ignores the parse error
+	if err != nil {
+		t.Fatalf("ReadResponse() unexpected error: %v", err)
+	}
+
+	// With invalid content-length and no chunked encoding, body is read until EOF
+	// Since there's nothing after headers, body should be empty
+	if len(resp.body) != 0 {
+		t.Errorf("body = %q, want empty", resp.body)
+	}
+}
+
+func TestReadChunkedBody_MalformedChunkLength(t *testing.T) {
+	// Chunked body with non-hex chunk size
+	input := "POST /api HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\ndata\r\n0\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	_, err := ReadRequest(br)
+
+	if err == nil {
+		t.Fatal("ReadRequest() expected error for malformed chunk length, got nil")
+	}
+	if !strings.Contains(err.Error(), "malformed chunk length") {
+		t.Errorf("error = %v, want malformed chunk length error", err)
+	}
+}
+
+func TestReadChunkedBody_WithExtensions(t *testing.T) {
+	// Chunked body with chunk extensions (e.g., "a;ext=val")
+	input := "POST /api HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=val\r\nhello\r\n0\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	req, err := ReadRequest(br)
+	if err != nil {
+		t.Fatalf("ReadRequest() error: %v", err)
+	}
+
+	if string(req.body) != "hello" {
+		t.Errorf("body = %q, want hello", req.body)
+	}
+}
+
+func TestWriteOriginForm(t *testing.T) {
+	// Parse a request with absolute URI form
+	input := "GET http://example.com/path?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	req, err := ReadRequest(br)
+	if err != nil {
+		t.Fatalf("ReadRequest() error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, err = req.WriteOriginForm(&buf)
+	if err != nil {
+		t.Fatalf("WriteOriginForm() error: %v", err)
+	}
+
+	output := buf.String()
+	// Should write origin form: "GET /path?q=1 HTTP/1.1"
+	if !strings.HasPrefix(output, "GET /path?q=1 HTTP/1.1\r\n") {
+		t.Errorf("WriteOriginForm() output = %q, want prefix \"GET /path?q=1 HTTP/1.1\\r\\n\"", output)
+	}
+	// Should NOT contain the absolute URI
+	if strings.Contains(output, "http://example.com") {
+		t.Errorf("WriteOriginForm() should not contain absolute URI, got %q", output)
+	}
+	// Should contain Host header
+	if !strings.Contains(output, "Host: example.com") {
+		t.Errorf("WriteOriginForm() missing Host header, got %q", output)
+	}
+}
+
+func TestWriteOriginForm_NoURI(t *testing.T) {
+	// When URI is nil, WriteOriginForm should fall back to path
+	req := &Request{
+		parsed:     true,
+		method:     []byte("GET"),
+		path:       []byte("/fallback"),
+		version:    []byte("HTTP/1.1"),
+		rawHeaders: []byte("Host: example.com"),
+		body:       []byte{},
+		headers:    []HeaderLine{{Key: []byte("Host"), Value: []byte("example.com")}},
+	}
+
+	var buf bytes.Buffer
+	_, err := req.WriteOriginForm(&buf)
+	if err != nil {
+		t.Fatalf("WriteOriginForm() error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.HasPrefix(output, "GET /fallback HTTP/1.1\r\n") {
+		t.Errorf("WriteOriginForm() output = %q, want prefix \"GET /fallback HTTP/1.1\\r\\n\"", output)
 	}
 }

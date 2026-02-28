@@ -2,9 +2,12 @@ package rawhttp
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"fmt"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 func TestResponse_StatusCode(t *testing.T) {
@@ -285,5 +288,100 @@ func TestClient_NewRequestResponse(t *testing.T) {
 
 	if resp == nil {
 		t.Error("NewRequestResponse() returned nil response")
+	}
+}
+
+func TestResponse_BrotliDecompression(t *testing.T) {
+	// Create brotli-compressed body
+	var buf bytes.Buffer
+	brWriter := brotli.NewWriter(&buf)
+	brWriter.Write([]byte("brotli compressed content"))
+	brWriter.Close()
+	brBody := buf.Bytes()
+
+	// Build raw response with brotli content
+	var rawResp bytes.Buffer
+	rawResp.WriteString("HTTP/1.1 200 OK\r\n")
+	rawResp.WriteString("Content-Encoding: br\r\n")
+	rawResp.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(brBody)))
+	rawResp.WriteString("\r\n")
+	rawResp.Write(brBody)
+
+	resp := &Response{Rawdata: rawResp.Bytes()}
+
+	body := resp.Body()
+
+	if string(body) != "brotli compressed content" {
+		t.Errorf("Body() = %q, want %q", body, "brotli compressed content")
+	}
+}
+
+func TestResponse_DeflateDecompression(t *testing.T) {
+	// Create deflate-compressed body
+	var buf bytes.Buffer
+	fw, err := flate.NewWriter(&buf, flate.DefaultCompression)
+	if err != nil {
+		t.Fatalf("flate.NewWriter() error: %v", err)
+	}
+	fw.Write([]byte("deflate compressed content"))
+	fw.Close()
+	deflateBody := buf.Bytes()
+
+	// Build raw response with deflate content
+	var rawResp bytes.Buffer
+	rawResp.WriteString("HTTP/1.1 200 OK\r\n")
+	rawResp.WriteString("Content-Encoding: deflate\r\n")
+	rawResp.WriteString(fmt.Sprintf("Content-Length: %d\r\n", len(deflateBody)))
+	rawResp.WriteString("\r\n")
+	rawResp.Write(deflateBody)
+
+	resp := &Response{Rawdata: rawResp.Bytes()}
+
+	body := resp.Body()
+
+	if string(body) != "deflate compressed content" {
+		t.Errorf("Body() = %q, want %q", body, "deflate compressed content")
+	}
+}
+
+func TestResponse_Header_Empty(t *testing.T) {
+	// Response with empty Rawdata
+	resp := &Response{Rawdata: []byte{}}
+
+	// ParseRawdata will fail on empty data, but Header should handle it gracefully
+	got := resp.Header("Content-Type")
+	if got != "" {
+		t.Errorf("Header() on empty response = %q, want empty string", got)
+	}
+}
+
+func TestResponse_Header_NoColon(t *testing.T) {
+	// Response with a header line that has no colon
+	rawdata := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nBadHeaderNoColon\r\nX-Good: value\r\nContent-Length: 0\r\n\r\n"
+	resp := &Response{Rawdata: []byte(rawdata)}
+
+	// Header with colon should still work
+	if got := resp.Header("Content-Type"); got != "text/html" {
+		t.Errorf("Header(Content-Type) = %q, want text/html", got)
+	}
+	if got := resp.Header("X-Good"); got != "value" {
+		t.Errorf("Header(X-Good) = %q, want value", got)
+	}
+	// Header without colon should not match anything
+	if got := resp.Header("BadHeaderNoColon"); got != "" {
+		t.Errorf("Header(BadHeaderNoColon) = %q, want empty string", got)
+	}
+}
+
+func TestResponse_Header_EmptyPreBody(t *testing.T) {
+	// Construct response with empty preBody directly
+	resp := &Response{
+		parsed:  true,
+		preBody: []byte{},
+	}
+
+	got := resp.Header("Content-Type")
+	if got != "" {
+		t.Errorf("Header() on empty preBody = %q, want empty string", got)
 	}
 }
