@@ -37,6 +37,10 @@ func (obj *Request) NormalizeRequest() {
 // 3. Updating Content-Length to reflect decompressed body size
 // 4. Rebuilding Rawdata from normalized components
 func (obj *Response) NormalizeResponse() {
+	// Force re-parsing to trigger decompression in ParseRawdata()
+	// (ReadResponse sets parsed=true but doesn't decompress)
+	obj.parsed = false
+
 	// Parse raw data to populate fields. ParseRawdata() handles decompression
 	// of gzip/br/deflate bodies. If parsing fails (e.g., invalid gzip),
 	// we return without changes (graceful fallback).
