@@ -309,7 +309,11 @@ func readChunkedBody(br *bufio.Reader, rawBuf *bytes.Buffer) ([]byte, error) {
 			// Read trailers (multiple header lines) until empty line
 			for {
 				trailerLine, err := readLine(br)
-				if err != nil && err != io.EOF {
+				if err != nil {
+					if err == io.EOF {
+						// Connection closed - trailers done
+						break
+					}
 					return nil, fmt.Errorf("reading chunk trailer: %w", err)
 				}
 				rawBuf.Write(trailerLine)
