@@ -101,10 +101,10 @@ func TestNormalizeRequest_PassthroughClean(t *testing.T) {
 		t.Errorf("Expected User-Agent to be 'test', got %q", userAgent)
 	}
 
-	// Verify Accept-Encoding was added (not present in original)
+	// Verify Accept-Encoding is NOT added when not present in original
 	acceptEncoding := req.Header("accept-encoding")
-	if acceptEncoding != "gzip, deflate, br" {
-		t.Errorf("Expected Accept-Encoding to be added as 'gzip, deflate, br', got %q", acceptEncoding)
+	if acceptEncoding != "" {
+		t.Errorf("Expected Accept-Encoding to not be added, got %q", acceptEncoding)
 	}
 }
 

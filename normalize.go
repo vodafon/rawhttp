@@ -11,7 +11,8 @@ import (
 // 2. Constraining Accept-Encoding to supported encodings (gzip, deflate, br)
 // 3. Removing proxy-related headers (Proxy-Connection, Proxy-Authorization)
 // 4. Removing Sec-WebSocket-Extensions header
-// 5. Clearing Rawdata to force reconstruction from parsed fields on WriteTo()
+// 5. If Transfer-Encoding: chunked, replacing it with Content-Length for the decoded body
+// 6. Clearing Rawdata to force reconstruction from parsed fields on WriteTo()
 func (obj *Request) NormalizeRequest() {
 	// Ensure all parsed fields are populated from Rawdata
 	obj.ParseRawdata()
@@ -25,6 +26,17 @@ func (obj *Request) NormalizeRequest() {
 
 	// Remove WebSocket extensions header
 	obj.RemoveHeader("Sec-WebSocket-Extensions")
+
+	// If request was chunked, replace Transfer-Encoding with Content-Length.
+	// ReadRequest/ParseRawdata already decoded the chunked body into obj.body,
+	// but Bytes() writes obj.body as-is (no chunked re-encoding). Without this,
+	// the target sees Transfer-Encoding: chunked but gets an identity-encoded body.
+	if obj.IsChunked() {
+		obj.RemoveHeader("Transfer-Encoding")
+		if len(obj.body) > 0 {
+			obj.SetHeader("content-length", []byte("Content-Length"), []byte(strconv.Itoa(len(obj.body))))
+		}
+	}
 
 	// Set Rawdata to nil to force WriteTo() to use Bytes() reconstruction
 	// This ensures all normalized headers are included in the output

@@ -350,9 +350,9 @@ func TestRequest_ConstrainAcceptEncoding(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:      "add accept-encoding when missing",
+			name:      "no-op when accept-encoding missing",
 			rawdata:   "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
-			wantValue: "gzip, deflate, br",
+			wantValue: "",
 			wantErr:  false,
 		},
 		{
@@ -386,9 +386,9 @@ func TestRequest_ConstrainAcceptEncoding(t *testing.T) {
 				t.Error("WriteTo() after ConstrainAcceptEncoding produced no output")
 			}
 			
-			// Verify output contains the Accept-Encoding header
+			// Verify output contains Accept-Encoding header only if it was present
 			output := buf.String()
-			if !strings.Contains(output, "Accept-Encoding: gzip, deflate, br") {
+			if tt.wantValue != "" && !strings.Contains(output, "Accept-Encoding: gzip, deflate, br") {
 				t.Errorf("WriteTo() output missing 'Accept-Encoding: gzip, deflate, br'\nGot: %s", output)
 			}
 		})

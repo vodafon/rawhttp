@@ -141,12 +141,18 @@ func (obj *Request) RemoveHeader(key string) {
 	obj.Rawdata = nil
 }
 
-// ConstrainAcceptEncoding sets the Accept-Encoding header to only gzip, deflate, and br.
+// ConstrainAcceptEncoding constrains the Accept-Encoding header to only gzip, deflate, and br.
 // These are the encodings rawhttp can decompress. If Accept-Encoding exists, it is replaced.
-// If it doesn't exist, it is added.
+// If the request has no Accept-Encoding header, none is added.
 func (obj *Request) ConstrainAcceptEncoding() {
-	obj.SetHeader("accept-encoding", []byte("Accept-Encoding"), []byte("gzip, deflate, br"))
-	obj.Rawdata = nil
+	obj.ParseRawdata()
+	for _, hl := range obj.headers {
+		if strings.ToLower(string(hl.Key)) == "accept-encoding" {
+			obj.SetHeader("accept-encoding", []byte("Accept-Encoding"), []byte("gzip, deflate, br"))
+			obj.Rawdata = nil
+			return
+		}
+	}
 }
 
 func (obj *Request) Bytes() []byte {
