@@ -75,12 +75,16 @@ func (obj *Response) NormalizeResponse() {
 		// Unknown or multiple encodings — return without changes
 		return
 	}
-
-	// Determine whether we need to set Content-Length
-	// If a compression encoding was present, we need to update Content-Length
-	// to reflect the decompressed body size.
+	// Determine whether we need to set Content-Length.
+	// We must add Content-Length when filterResponseHeaders strips headers that
+	// defined the body framing:
+	// - Content-Encoding was present (body was decompressed, size changed)
+	// - Transfer-Encoding was present (chunked framing was decoded into plain body)
 	var clPtr *string
-	if contentEncoding != "" && contentEncoding != "identity" {
+	transferEncoding := responseHeaderValue(preBody, "transfer-encoding")
+	needsContentLength := (contentEncoding != "" && contentEncoding != "identity") ||
+		strings.Contains(strings.ToLower(transferEncoding), "chunked")
+	if needsContentLength {
 		contentLengthVal := strconv.Itoa(len(obj.body))
 		clPtr = &contentLengthVal
 	}
