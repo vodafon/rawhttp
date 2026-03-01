@@ -157,6 +157,15 @@ func ReadRequest(br *bufio.Reader) (*Request, error) {
 // Rawdata from the raw bytes read. Body bytes are preserved raw without
 // decompression.
 func ReadResponse(br *bufio.Reader) (*Response, error) {
+	resp, _, err := ReadResponsePartial(br)
+	return resp, err
+}
+
+// ReadResponsePartial parses an HTTP response like ReadResponse, but on error
+// also returns any partial data read before the failure. This is useful for
+// diagnosing timeouts or connection resets where the caller needs to see what
+// bytes were received. On success, partial is nil.
+func ReadResponsePartial(br *bufio.Reader) (resp *Response, partial []byte, err error) {
 	var rawBuf bytes.Buffer
 	var preBodyBuf bytes.Buffer
 
@@ -164,9 +173,9 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 	statusLine, err := readLine(br)
 	if err != nil {
 		if err == io.EOF && len(statusLine) == 0 {
-			return nil, io.EOF
+			return nil, nil, io.EOF
 		}
-		return nil, fmt.Errorf("reading status line: %w", err)
+		return nil, nil, fmt.Errorf("reading status line: %w", err)
 	}
 
 	trimmedStatus := bytes.TrimRight(statusLine, "\r\n")
@@ -177,11 +186,11 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 	// Parse status line: HTTP/1.1 200 OK
 	parts := bytes.SplitN(trimmedStatus, []byte(" "), 3)
 	if len(parts) < 2 {
-		return nil, ErrMalformedStatusLine
+		return nil, rawBuf.Bytes(), ErrMalformedStatusLine
 	}
 	statusCode, err := strconv.Atoi(string(parts[1]))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrMalformedStatusLine, parts[1])
+		return nil, rawBuf.Bytes(), fmt.Errorf("%w: %s", ErrMalformedStatusLine, parts[1])
 	}
 
 	// Read headers
@@ -191,7 +200,7 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 	for {
 		headerLine, err := readLine(br)
 		if err != nil && len(headerLine) == 0 {
-			return nil, fmt.Errorf("reading response headers: %w", err)
+			return nil, rawBuf.Bytes(), fmt.Errorf("reading response headers: %w", err)
 		}
 
 		trimmed := bytes.TrimRight(headerLine, "\r\n")
@@ -233,14 +242,15 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 	} else if isChunked {
 		body, err = readChunkedBody(br, &rawBuf)
 		if err != nil {
-			return nil, fmt.Errorf("reading chunked response body: %w", err)
+			return nil, rawBuf.Bytes(), fmt.Errorf("reading chunked response body: %w", err)
 		}
 	} else if contentLength >= 0 {
 		body = make([]byte, contentLength)
 		if contentLength > 0 {
 			_, err = io.ReadFull(br, body)
 			if err != nil {
-				return nil, fmt.Errorf("reading response body: %w", err)
+				rawBuf.Write(body)
+				return nil, rawBuf.Bytes(), fmt.Errorf("reading response body: %w", err)
 			}
 		}
 		rawBuf.Write(body)
@@ -249,12 +259,13 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 		// read until EOF (handles Connection: close responses)
 		body, err = io.ReadAll(br)
 		if err != nil {
-			return nil, fmt.Errorf("reading response body until EOF: %w", err)
+			rawBuf.Write(body)
+			return nil, rawBuf.Bytes(), fmt.Errorf("reading response body until EOF: %w", err)
 		}
 		rawBuf.Write(body)
 	}
 
-	resp := &Response{
+	resp = &Response{
 		Rawdata:    rawBuf.Bytes(),
 		parsed:     true,
 		httpLine:   trimmedStatus,
@@ -263,7 +274,7 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 		body:       body,
 	}
 
-	return resp, nil
+	return resp, nil, nil
 }
 
 // readLine reads a single line from the reader, handling both \r\n and \n endings.
