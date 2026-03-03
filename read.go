@@ -152,12 +152,12 @@ func ReadRequest(br *bufio.Reader) (*Request, error) {
 }
 
 // ReadResponse parses an HTTP response from a streaming bufio.Reader.
-// It reads the status line, headers, and body (based on Content-Length,
-// Transfer-Encoding, or EOF), populates all parsed fields, and builds
-// Rawdata from the raw bytes read. Body bytes are preserved raw without
-// decompression.
-func ReadResponse(br *bufio.Reader) (*Response, error) {
-	resp, _, err := ReadResponsePartial(br)
+// The req parameter is the request that initiated this response; it may be
+// nil when the request is unknown (e.g., parsing standalone response bytes).
+// When req is provided and the method is HEAD, the body is not read even if
+// Content-Length or Transfer-Encoding headers are present (per RFC 9110 §9.3.2).
+func ReadResponse(br *bufio.Reader, req *Request) (*Response, error) {
+	resp, _, err := ReadResponsePartial(br, req)
 	return resp, err
 }
 
@@ -165,7 +165,8 @@ func ReadResponse(br *bufio.Reader) (*Response, error) {
 // also returns any partial data read before the failure. This is useful for
 // diagnosing timeouts or connection resets where the caller needs to see what
 // bytes were received. On success, partial is nil.
-func ReadResponsePartial(br *bufio.Reader) (resp *Response, partial []byte, err error) {
+// The req parameter follows the same semantics as ReadResponse.
+func ReadResponsePartial(br *bufio.Reader, req *Request) (resp *Response, partial []byte, err error) {
 	var rawBuf bytes.Buffer
 	var preBodyBuf bytes.Buffer
 
@@ -235,9 +236,10 @@ func ReadResponsePartial(br *bufio.Reader) (resp *Response, partial []byte, err 
 
 	// Read body
 	var body []byte
+	isHead := req != nil && strings.EqualFold(string(req.method), "HEAD")
 	noBodyStatus := (statusCode >= 100 && statusCode < 200) || statusCode == 204 || statusCode == 304
 
-	if noBodyStatus {
+	if noBodyStatus || isHead {
 		body = []byte{}
 	} else if isChunked {
 		body, err = readChunkedBody(br, &rawBuf)

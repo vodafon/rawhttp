@@ -373,7 +373,7 @@ func TestReadResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			br := bufio.NewReader(strings.NewReader(tt.input))
-			resp, err := ReadResponse(br)
+			resp, err := ReadResponse(br, nil)
 
 			if tt.wantErr {
 				if err == nil {
@@ -421,7 +421,7 @@ func TestReadResponse_GzipPreservedRaw(t *testing.T) {
 	rawResp.Write(gzBody)
 
 	br := bufio.NewReader(bytes.NewReader(rawResp.Bytes()))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -441,7 +441,7 @@ func TestReadResponse_ReadUntilEOF(t *testing.T) {
 	// No Content-Length, not chunked, not a no-body status → read until EOF
 	input := "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nsome body data here"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestReadResponse_ReadUntilEOF(t *testing.T) {
 func TestReadResponse_RawdataPreserved(t *testing.T) {
 	input := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestReadResponse_RawdataPreserved(t *testing.T) {
 func TestReadResponse_Header(t *testing.T) {
 	input := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Custom: myval\r\nContent-Length: 0\r\n\r\n"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestWriteTo_RequestFromBytes(t *testing.T) {
 func TestWriteTo_Response(t *testing.T) {
 	input := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -690,7 +690,7 @@ func TestWriteTo_Response(t *testing.T) {
 func TestWriteTo_ResponseRoundTrip(t *testing.T) {
 	input := "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nnot found"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestReadRequest_ChunkedRawdataPreserved(t *testing.T) {
 func TestReadResponse_StatusCodeAccessor(t *testing.T) {
 	input := "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestReadResponse_StatusCodeAccessor(t *testing.T) {
 func TestReadResponse_PreBody(t *testing.T) {
 	input := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 	if err != nil {
 		t.Fatalf("ReadResponse() error: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestReadRequest_MalformedContentLength(t *testing.T) {
 func TestReadResponse_MalformedStatusCode(t *testing.T) {
 	input := "HTTP/1.1 XYZ OK\r\nContent-Length: 0\r\n\r\n"
 	br := bufio.NewReader(strings.NewReader(input))
-	_, err := ReadResponse(br)
+	_, err := ReadResponse(br, nil)
 
 	if err == nil {
 		t.Fatal("ReadResponse() expected error for non-numeric status code, got nil")
@@ -838,7 +838,7 @@ func TestReadResponse_NoBodyStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			br := bufio.NewReader(strings.NewReader(tt.input))
-			resp, err := ReadResponse(br)
+			resp, err := ReadResponse(br, nil)
 			if err != nil {
 				t.Fatalf("ReadResponse() error: %v", err)
 			}
@@ -850,12 +850,125 @@ func TestReadResponse_NoBodyStatus(t *testing.T) {
 	}
 }
 
+func TestReadResponse_HeadRequestNoBody(t *testing.T) {
+	// RFC 9110 §9.3.2: HEAD responses MUST NOT contain a message body,
+	// even when Content-Length or Transfer-Encoding headers are present.
+	headReq := &Request{
+		parsed: true,
+		method: []byte("HEAD"),
+	}
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "HEAD 200 with Content-Length",
+			input: "HTTP/1.1 200 OK\r\nContent-Length: 12345\r\n\r\n",
+		},
+		{
+			name:  "HEAD 200 with Transfer-Encoding chunked",
+			input: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+		},
+		{
+			name:  "HEAD 301 with Content-Length",
+			input: "HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\nContent-Length: 100\r\n\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			br := bufio.NewReader(strings.NewReader(tt.input))
+			resp, err := ReadResponse(br, headReq)
+			if err != nil {
+				t.Fatalf("ReadResponse() error: %v", err)
+			}
+
+			if len(resp.body) != 0 {
+				t.Errorf("body = %q, want empty (HEAD response)", resp.body)
+			}
+			if resp.statusCode != 200 && resp.statusCode != 301 {
+				t.Errorf("statusCode = %d, unexpected", resp.statusCode)
+			}
+			if !resp.parsed {
+				t.Error("parsed should be true")
+			}
+		})
+	}
+}
+
+func TestReadResponse_HeadRequestPreservesRawdata(t *testing.T) {
+	// Verify that HEAD response Rawdata contains only headers, not phantom body bytes
+	headReq := &Request{
+		parsed: true,
+		method: []byte("HEAD"),
+	}
+
+	input := "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nContent-Type: text/html\r\n\r\n"
+	br := bufio.NewReader(strings.NewReader(input))
+	resp, err := ReadResponse(br, headReq)
+	if err != nil {
+		t.Fatalf("ReadResponse() error: %v", err)
+	}
+
+	if !bytes.Equal(resp.Rawdata, []byte(input)) {
+		t.Errorf("Rawdata = %q, want %q", resp.Rawdata, input)
+	}
+}
+
+func TestReadResponse_HeadRequestNilReqFallback(t *testing.T) {
+	// When req is nil (e.g., ParseRawdata), Content-Length body is still read.
+	// This tests backward compatibility.
+	input := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+	br := bufio.NewReader(strings.NewReader(input))
+	resp, err := ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("ReadResponse() error: %v", err)
+	}
+
+	if string(resp.body) != "hello" {
+		t.Errorf("body = %q, want %q", resp.body, "hello")
+	}
+}
+
+func TestReadResponse_HeadDoesNotConsumeNextResponse(t *testing.T) {
+	// Simulate a keep-alive scenario: HEAD response followed by GET response.
+	// ReadResponse with HEAD request should NOT consume the second response's bytes.
+	headReq := &Request{
+		parsed: true,
+		method: []byte("HEAD"),
+	}
+
+	// Two responses concatenated on the wire
+	wire := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n" +
+		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
+	br := bufio.NewReader(strings.NewReader(wire))
+
+	// First: HEAD response — should not read body
+	resp1, err := ReadResponse(br, headReq)
+	if err != nil {
+		t.Fatalf("first ReadResponse() error: %v", err)
+	}
+	if len(resp1.body) != 0 {
+		t.Errorf("HEAD body = %q, want empty", resp1.body)
+	}
+
+	// Second: GET response — should read full body
+	resp2, err := ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("second ReadResponse() error: %v", err)
+	}
+	if string(resp2.body) != "hello" {
+		t.Errorf("GET body = %q, want %q", resp2.body, "hello")
+	}
+}
+
 func TestReadResponse_ContentLengthIgnoresError(t *testing.T) {
 	// Response parser ignores parse errors for non-numeric content-length
 	// (unlike request parser which returns ErrMalformedContentLength)
 	input := "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n"
 	br := bufio.NewReader(strings.NewReader(input))
-	resp, err := ReadResponse(br)
+	resp, err := ReadResponse(br, nil)
 
 	// Should not error — response parser ignores the parse error
 	if err != nil {

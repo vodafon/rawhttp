@@ -29,7 +29,7 @@ go test -v -run TestParseRawdata ./...
     - Headers are stored in `[]HeaderLine` slice, preserving order and duplicates natively.
 3. **`response.go`**: `Response` struct with timing metrics (`TimeToFirstByte`, `TimeToLastByte`). Handles Content-Encoding decompression (gzip, br, deflate).
     - `ParseRawdata()` uses the custom `ReadResponse()` from `read.go` internally — no `net/http` dependency.
-4. **`read.go`**: Wire-level HTTP parsing from `bufio.Reader` streams. Implements `ReadRequest()` and `ReadResponse()` for MITM proxy use. Includes helpers: `readLine()`, `readChunkedBody()`, `copyBytes()`. Defines sentinel errors (`ErrMalformedRequestLine`, `ErrMalformedStatusLine`, `ErrMalformedChunkLength`, `ErrMalformedContentLength`).
+4. **`read.go`**: Wire-level HTTP parsing from `bufio.Reader` streams. Implements `ReadRequest()` and `ReadResponse(br, req)` for MITM proxy use. `ReadResponse` accepts the originating `*Request` (may be nil) to correctly handle HEAD responses per RFC 9110 §9.3.2 — skipping body even when Content-Length is present. Includes helpers: `readLine()`, `readChunkedBody()`, `copyBytes()`. Defines sentinel errors (`ErrMalformedRequestLine`, `ErrMalformedStatusLine`, `ErrMalformedChunkLength`, `ErrMalformedContentLength`).
 5. **`accessors.go`**: Getter methods for parsed Request/Response fields. Request: `Method()`, `Host()`, `Path()`, `Version()`, `Header()`, `ContentLength()`, `IsChunked()`, `Body()`. Response: `Header()`. Serialization: `Request.WriteTo()` (absolute-URI form), `Request.WriteOriginForm()` (origin form), `Response.WriteTo()`.
 6. **`pool.go`**: `ConnPool` for per-host idle connections. Uses LIFO retrieval and auto-cleanup.
 7. **`proxy.go`**: HTTP/HTTPS CONNECT proxy dialer. Implements `golang.org/x/net/proxy.Dialer`. Uses raw byte CONNECT handshake (no `net/http`).
@@ -74,7 +74,7 @@ type ConnPool struct { /* per-host idle connections, LIFO, expiration */ }
 ```go
 // Wire parsing (from bufio.Reader streams — used by MITM proxies)
 func ReadRequest(br *bufio.Reader) (*Request, error)
-func ReadResponse(br *bufio.Reader) (*Response, error)
+func ReadResponse(br *bufio.Reader, req *Request) (*Response, error)  // req may be nil; HEAD-aware
 
 // Request accessors
 func (obj *Request) Method() string

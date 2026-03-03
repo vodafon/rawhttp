@@ -73,7 +73,7 @@ func (obj *Response) ParseRawdata() error {
 		return nil
 	}
 
-	resp, err := ReadResponse(bufio.NewReader(bytes.NewReader(obj.Rawdata)))
+	resp, err := ReadResponse(bufio.NewReader(bytes.NewReader(obj.Rawdata)), nil)
 	if err != nil {
 		return err
 	}
