@@ -24,7 +24,7 @@ go test -v -run TestParseRawdata ./...
 
 ## Source Files
 
-1. **`client.go`**: `Client` struct and connection pooling. Implements `Do()`, `DoHTTP()`, `DoHTTPS()`, `DoProxy()`, `DoWithProxy()`, and `DoConn()`. Uses a two-phase timeout read loop: `Timeout` for the first byte, then `QuietTimeout` for silence detection to capture smuggled responses.
+1. **`client.go`**: `Client` struct and connection pooling. Implements `Do()`, `DoHTTP()`, `DoHTTPS()`, `DoProxy()`, `DoWithProxy()`, and `DoConn()`. Default mode uses `ReadResponse()` from `read.go` for spec-compliant response reading (Content-Length, chunked, EOF). `ReadFull` mode preserves the timeout-based read loop for security research (smuggling detection).
 2. **`request.go`**: `Request` struct for raw HTTP requests. Includes `ParseRawdata()` to split bytes into components and `Bytes()` for serialization. Supports template variables like `||HOST||`, `||PATH||`, and `||CLEN||`.
     - Headers are stored in `[]HeaderLine` slice, preserving order and duplicates natively.
 3. **`response.go`**: `Response` struct with timing metrics (`TimeToFirstByte`, `TimeToLastByte`). Handles Content-Encoding decompression (gzip, br, deflate).
@@ -43,7 +43,8 @@ type Client struct {
     proxyURI             *url.URL
     pool                 *ConnPool
     DisableKeepAlive     bool
-    QuietTimeout         time.Duration
+    QuietTimeout         time.Duration  // Only used when ReadFull is true
+    ReadFull             bool           // Enables timeout-based byte accumulation for smuggling detection
 }
 
 type Request struct {
