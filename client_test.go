@@ -429,33 +429,48 @@ func TestDoConnInternal_EOF(t *testing.T) {
 	clientConn.Close()
 }
 
-func TestDoConnInternal_QuietTimeout(t *testing.T) {
-	// Test the QuietTimeout=0 default path
+func TestDoConnInternal_SpecBased_IgnoresQuietTimeout(t *testing.T) {
+	// Verify that in normal mode (ReadFull=false), spec-based reading uses
+	// Content-Length to determine response completeness. QuietTimeout is
+	// irrelevant — even when set to 0, the response is read correctly.
 	client := &Client{
 		TransformRequestFunc: PrepareRequest,
 		Timeout:              2 * time.Second,
-		QuietTimeout:         0, // should use DefaultQuietTimeout
+		QuietTimeout:         0, // irrelevant in normal mode
 	}
-
+	
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
-
+	
 	go func() {
 		buf := make([]byte, 4096)
 		serverConn.Read(buf)
 		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 		serverConn.Close()
 	}()
-
+	
 	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 	resp := &Response{}
-
+	
 	err := client.doConnInternal(clientConn, req, resp)
 	if err != nil {
 		t.Fatalf("doConnInternal() error: %v", err)
 	}
 	if !strings.Contains(string(resp.Rawdata), "ok") {
 		t.Errorf("resp.Rawdata should contain 'ok', got %q", resp.Rawdata)
+	}
+	// Verify spec-based reading populates parsed fields via ReadResponsePartial
+	if resp.StatusCode() != 200 {
+		t.Errorf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	if string(resp.Body()) != "ok" {
+		t.Errorf("Body() = %q, want %q", resp.Body(), "ok")
+	}
+	if resp.TimeToFirstByte == 0 {
+		t.Error("TimeToFirstByte should be > 0")
+	}
+	if resp.TimeToLastByte == 0 {
+		t.Error("TimeToLastByte should be > 0")
 	}
 }
 
@@ -1120,4 +1135,287 @@ func TestDoConnInternal_HEAD_Chunked(t *testing.T) {
 	if len(resp.Body()) != 0 {
 		t.Errorf("Body() = %q, want empty for HEAD response", resp.Body())
 	}
+}
+
+func TestDoConnInternal_SpecBased_ContentLength(t *testing.T) {
+	// Verify that normal mode (ReadFull=false) reads exactly Content-Length bytes
+	// and returns without timeout, even when the server keeps the connection open.
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	// Server: read request, write response with Content-Length, keep connection open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello"))
+		// Keep connection open — do NOT close
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n")
+	resp := &Response{}
+
+	start := time.Now()
+	err := client.doConnInternal(clientConn, req, resp)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	// Should complete quickly (well under Timeout) because CL reading is exact
+	if elapsed > time.Second {
+		t.Errorf("took %v, expected < 1s (should not wait for timeout)", elapsed)
+	}
+
+	// Verify response body
+	if !strings.Contains(string(resp.Rawdata), "hello") {
+		t.Errorf("resp.Rawdata = %q, want to contain 'hello'", resp.Rawdata)
+	}
+	if resp.StatusCode() != 200 {
+		t.Errorf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+	if string(resp.Body()) != "hello" {
+		t.Errorf("Body() = %q, want 'hello'", resp.Body())
+	}
+
+	// Timing metrics should be populated
+	if resp.TimeToFirstByte == 0 {
+		t.Error("TimeToFirstByte should be > 0")
+	}
+	if resp.TimeToLastByte == 0 {
+		t.Error("TimeToLastByte should be > 0")
+	}
+
+	clientConn.Close()
+}
+
+func TestDoConnInternal_SpecBased_Chunked(t *testing.T) {
+	// Verify normal mode correctly reads chunked body and returns
+	// without waiting for timeout, even when connection stays open.
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	// Server: read request, write chunked response, keep connection open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		chunkedResp := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n" +
+			"5\r\nhello\r\n" +
+			"6\r\n world\r\n" +
+			"0\r\n\r\n"
+		serverConn.Write([]byte(chunkedResp))
+		// Keep connection open — do NOT close
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n")
+	resp := &Response{}
+
+	start := time.Now()
+	err := client.doConnInternal(clientConn, req, resp)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	// Should complete quickly (well under Timeout)
+	if elapsed > time.Second {
+		t.Errorf("took %v, expected < 1s (should not wait for timeout)", elapsed)
+	}
+
+	if resp.StatusCode() != 200 {
+		t.Errorf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+
+	// Chunked body should be decoded: "hello" + " world" = "hello world"
+	if string(resp.Body()) != "hello world" {
+		t.Errorf("Body() = %q, want 'hello world'", resp.Body())
+	}
+
+	if resp.TimeToFirstByte == 0 {
+		t.Error("TimeToFirstByte should be > 0")
+	}
+	if resp.TimeToLastByte == 0 {
+		t.Error("TimeToLastByte should be > 0")
+	}
+
+	clientConn.Close()
+}
+
+func TestDoConnInternal_ReadFull(t *testing.T) {
+	// Verify ReadFull mode reads beyond Content-Length and captures extra bytes.
+	// This is used for security research (e.g., HTTP smuggling detection).
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         50 * time.Millisecond,
+		ReadFull:             true,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	// Server: read request, write CL:5 body "hello" + extra smuggled bytes, then keep open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		// Send response with CL:5 but extra data beyond it
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloSMUGGLED"))
+		// Keep connection open so ReadFull mode detects silence via QuietTimeout
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	// ReadFull should capture ALL bytes including beyond Content-Length
+	rawdata := string(resp.Rawdata)
+	if !strings.Contains(rawdata, "hello") {
+		t.Errorf("resp.Rawdata should contain 'hello', got %q", rawdata)
+	}
+	if !strings.Contains(rawdata, "SMUGGLED") {
+		t.Errorf("resp.Rawdata should contain 'SMUGGLED', got %q", rawdata)
+	}
+
+	// Timing metrics should be populated
+	if resp.TimeToFirstByte == 0 {
+		t.Error("TimeToFirstByte should be > 0")
+	}
+	if resp.TimeToLastByte == 0 {
+		t.Error("TimeToLastByte should be > 0")
+	}
+
+	serverConn.Close()
+}
+
+func TestDoConnInternal_ReadFull_NoPool(t *testing.T) {
+	// Verify ReadFull mode prevents connection pooling.
+	pool := NewDefaultConnPool()
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         50 * time.Millisecond,
+		pool:                 pool,
+		ReadFull:             true,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	poolKey := "http://example.com:80"
+
+	// Server: read request, write keep-alive response, keep conn open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"))
+		// Keep connection open
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnWithPool(clientConn, req, resp, poolKey)
+	if err != nil {
+		t.Fatalf("doConnWithPool() error: %v", err)
+	}
+
+	// Connection should NOT be in pool when ReadFull=true
+	if pool.LenForHost(poolKey) != 0 {
+		t.Errorf("pool.LenForHost(%q) = %d, want 0 (ReadFull disables pooling)", poolKey, pool.LenForHost(poolKey))
+	}
+
+	pool.CloseAll()
+	serverConn.Close()
+}
+
+func TestDoConnInternal_NoContentLength_KeepAlive(t *testing.T) {
+	// Edge case: server sends response without Content-Length or chunked encoding
+	// but with Connection: keep-alive. Normal mode should handle this correctly
+	// (terminate via Timeout, not hang forever).
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              200 * time.Millisecond,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	// Server: send response without CL/chunked, keep connection open
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\nsome body data"))
+		// Keep connection open — no CL, no chunked, no EOF
+	}()
+
+	req := simpleTestRequest("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	start := time.Now()
+	err := client.doConnInternal(clientConn, req, resp)
+	elapsed := time.Since(start)
+
+	// Should terminate (via Timeout deadline on conn), not hang forever.
+	// The response may be returned as an error or as partial data.
+	if elapsed > 2*time.Second {
+		t.Fatalf("doConnInternal() took %v, expected to terminate within Timeout", elapsed)
+	}
+
+	// The response should contain the body data that was sent.
+	// ReadResponsePartial's io.ReadAll hits the deadline, returns partial data + timeout error.
+	// The timeout-with-partial-data path re-parses it as a complete response.
+	if err == nil {
+		// If no error, body should contain the data
+		if !strings.Contains(string(resp.Rawdata), "some body data") {
+			t.Errorf("resp.Rawdata = %q, want to contain 'some body data'", resp.Rawdata)
+		}
+	} else {
+		// If error, Rawdata should still have partial data
+		if len(resp.Rawdata) == 0 {
+			t.Errorf("expected resp.Rawdata to contain partial data, got empty; err: %v", err)
+		}
+	}
+
+	clientConn.Close()
 }

@@ -422,7 +422,7 @@ func (obj *Client) doConnInternal_ReadFull(conn net.Conn, tr *timingReader, req 
 	
 	for {
 		tmp := make([]byte, 4096)
-		n, err := conn.Read(tmp)
+		n, err := tr.Read(tmp)
 		
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
