@@ -1,6 +1,7 @@
 package rawhttp
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"fmt"
@@ -13,6 +14,40 @@ import (
 
 	"golang.org/x/net/proxy"
 )
+
+type timingReader struct {
+	conn           net.Conn
+	firstByteTime  time.Time
+	lastByteTime   time.Time
+	writeEndTime   time.Time
+	gotFirstByte   bool
+}
+
+func (tr *timingReader) Read(p []byte) (n int, err error) {
+	n, err = tr.conn.Read(p)
+	if n > 0 {
+		if !tr.gotFirstByte {
+			tr.firstByteTime = time.Now()
+			tr.gotFirstByte = true
+		}
+		tr.lastByteTime = time.Now()
+	}
+	return n, err
+}
+
+func (tr *timingReader) TTFB() time.Duration {
+	if !tr.gotFirstByte {
+		return 0
+	}
+	return tr.firstByteTime.Sub(tr.writeEndTime)
+}
+
+func (tr *timingReader) TTLB() time.Duration {
+	if !tr.gotFirstByte {
+		return 0
+	}
+	return tr.lastByteTime.Sub(tr.writeEndTime)
+}
 
 var (
 	InvalidURLError     = fmt.Errorf("Invalid URL")
@@ -38,7 +73,14 @@ type Client struct {
 	// and ensures full reads. Default: 2 seconds.
 	// The read loop resets this timer each time data is received.
 	// Total read time is still bounded by Timeout.
+	// Only used when ReadFull is true.
 	QuietTimeout time.Duration
+
+	// ReadFull enables the legacy two-phase timeout-based byte accumulation mode.
+	// When true, uses Timeout for first byte and QuietTimeout for silence detection.
+	// When false (default), uses spec-based ReadResponse for structured reading.
+	// ReadFull disables connection pooling (connections are always closed after use).
+	ReadFull bool
 }
 
 const (
@@ -320,6 +362,7 @@ func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, p
 	canReuse := err == nil &&
 		obj.pool != nil &&
 		!obj.DisableKeepAlive &&
+		!obj.ReadFull &&
 		!req.WantsClose() &&
 		!req.WantsUpgrade() &&
 		!resp.ConnectionClose()
@@ -336,92 +379,145 @@ func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, p
 }
 
 // doConnInternal performs the actual HTTP request/response exchange.
-// It uses a two-phase timeout approach:
-//  1. Wait up to Timeout for the first response data
-//  2. After receiving data, use QuietTimeout to detect end of response
-//     (wait for silence before considering response complete)
+// When ReadFull is true, uses legacy two-phase timeout-based byte accumulation.
+// When ReadFull is false (default), uses spec-based ReadResponse for structured reading.
+// With timingReader for TTFB/TTLB metrics in both paths.
 //
-// This helps detect smuggled responses and ensures all data is captured.
+// For responses without Content-Length and without chunked encoding,
+// the spec-based ReadResponsePartial calls io.ReadAll which blocks on keep-alive connections.
+// The conn.SetReadDeadline covers this — when the deadline fires, io.ReadAll
+// returns a timeout error. If partial data was received, we treat the timeout
+// as a complete response (same as the QuietTimeout behavior for no-CL case).
+//
 // If EOF is received without any data, it returns io.EOF as an error
 // (indicating a stale/closed connection rather than a valid empty response).
 func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) error {
 	resp.req = req // Store request for HEAD-aware response parsing
-	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Bytes())
 	if _, err := conn.Write(req.Bytes()); err != nil {
 		return err
 	}
-
-	writeTime := time.Now() // Start timing after write completes
-
-	quietTimeout := obj.QuietTimeout
-	if quietTimeout == 0 {
-		quietTimeout = DefaultQuietTimeout
+	
+	// Create timingReader wrapping the connection
+	tr := &timingReader{
+		conn:         conn,
+		writeEndTime: time.Now(),
 	}
+	
+	if obj.ReadFull {
+		// Legacy two-phase timeout-based byte accumulation mode
+		return obj.doConnInternal_ReadFull(conn, tr, req, resp)
+	}
+	
+	// Default: spec-based ReadResponse path
+	return obj.doConnInternal_ReadSpec(conn, tr, req, resp)
+}
 
-	absoluteDeadline := time.Now().Add(obj.Timeout)
-	buf := make([]byte, 4096)
-	receivedData := false
-
+// doConnInternal_ReadFull handles the legacy two-phase timeout-based byte accumulation.
+// Phase 1: Timeout for first byte. Phase 2: QuietTimeout for silence detection.
+func (obj *Client) doConnInternal_ReadFull(conn net.Conn, tr *timingReader, req *Request, resp *Response) error {
+	// Set initial timeout for first byte
+	conn.SetReadDeadline(time.Now().Add(obj.Timeout))
+	
+	buf := make([]byte, 0, 256*1024) // Start with 256KB capacity
+	
 	for {
-		var readDeadline time.Time
-
-		if !receivedData {
-			// Phase 1: Waiting for first data - use absolute deadline (Timeout)
-			readDeadline = absoluteDeadline
-		} else {
-			// Phase 2: Already received data - use QuietTimeout for silence detection
-			// but still respect the absolute deadline
-			readDeadline = time.Now().Add(quietTimeout)
-			if readDeadline.After(absoluteDeadline) {
-				readDeadline = absoluteDeadline
-			}
-		}
-		conn.SetReadDeadline(readDeadline)
-
-		n, err := conn.Read(buf)
+		tmp := make([]byte, 4096)
+		n, err := conn.Read(tmp)
+		
 		if n > 0 {
-			now := time.Now()
-			if !receivedData {
-				resp.TimeToFirstByte = now.Sub(writeTime)
-			}
-			resp.TimeToLastByte = now.Sub(writeTime)
-
-			receivedData = true
-			// fmt.Printf("===REC===: %q\n", buf[:n])
-			resp.Rawdata = append(resp.Rawdata, buf[:n]...)
-			// Data received - continue reading (quiet timer resets on next iteration)
-			continue
+			buf = append(buf, tmp[:n]...)
+			
+			// After first byte, switch to QuietTimeout for silence detection
+			conn.SetReadDeadline(time.Now().Add(obj.QuietTimeout))
 		}
-
+		
 		if err != nil {
-			// Timeout handling
 			if isTimeoutError(err) {
-				if !receivedData {
-					// Phase 1 timeout - no response within Timeout
-					return err
+				// Timeout is expected after silence period or first byte delay
+				if len(buf) > 0 {
+					break // We have data, consider response complete
 				}
-				// Phase 2 timeout (QuietTimeout) - response complete
-				return nil
-			}
-
-			// EOF handling
-			if err == io.EOF {
-				if receivedData {
-					// Got data then EOF - valid response completion
-					return nil
-				}
-				// EOF with no data - connection was closed (stale connection)
+				// Timeout with no data — return error
 				return err
 			}
-
-			if strings.HasSuffix(err.Error(), "tls: user canceled") {
-				return nil
+			if err == io.EOF {
+				if len(buf) == 0 {
+					return io.EOF // Stale connection
+				}
+				break // We have data, consider complete
 			}
 			return err
 		}
 	}
+	
+	resp.Rawdata = buf
+	resp.TimeToFirstByte = tr.TTFB()
+	resp.TimeToLastByte = tr.TTLB()
+	
+	return nil
 }
-
+// doConnInternal_ReadSpec handles spec-based response reading using ReadResponsePartial.
+func (obj *Client) doConnInternal_ReadSpec(conn net.Conn, tr *timingReader, req *Request, resp *Response) error {
+	// Set read deadline for the entire response read (first byte + body).
+	// This also prevents io.ReadAll from blocking indefinitely on keep-alive
+	// connections that have no Content-Length or chunked encoding.
+	conn.SetReadDeadline(time.Now().Add(obj.Timeout))
+	
+	br := bufio.NewReader(tr)
+	
+	resp2, partial, err := ReadResponsePartial(br, req)
+	if err != nil {
+		// EOF with no data — stale connection
+		if err == io.EOF {
+			return io.EOF
+		}
+		
+		// Timeout or other error with no data — return the error
+		if partial == nil && resp2 == nil {
+			return err
+		}
+		
+		// Error with partial data: check if it's a timeout with enough data
+		// to be a complete response (e.g., io.ReadAll timeout on no-CL response).
+		// If partial data contains a complete status line + headers, treat as success.
+		if isTimeoutError(err) && len(partial) > 0 && bytes.Contains(partial, []byte("\r\n\r\n")) {
+			// Timeout with partial data that has complete headers — treat as complete response.
+			// Re-parse the partial data as a complete response.
+			resp2, _, rerr := ReadResponsePartial(bufio.NewReader(bytes.NewReader(partial)), req)
+			if rerr == nil && resp2 != nil {
+				// Successfully parsed partial data — fall through to copy fields below
+			} else {
+				// Couldn't re-parse; store partial data and return original error
+				resp.Rawdata = partial
+				resp.TimeToFirstByte = tr.TTFB()
+				resp.TimeToLastByte = tr.TTLB()
+				return err
+			}
+		} else if partial != nil {
+			// Non-timeout error with partial data — store and return error
+			resp.Rawdata = partial
+			resp.TimeToFirstByte = tr.TTFB()
+			resp.TimeToLastByte = tr.TTLB()
+			return err
+		} else {
+			return err
+		}
+	}
+	
+	// Copy fields from resp2 into the caller's resp
+	resp.Rawdata = resp2.Rawdata
+	resp.httpLine = resp2.httpLine
+	resp.statusCode = resp2.statusCode
+	resp.preBody = resp2.preBody
+	resp.body = resp2.body
+	resp.parsed = false // CRITICAL: false so ParseRawdata() can trigger decompression later
+	
+	// Populate timing from timingReader
+	resp.TimeToFirstByte = tr.TTFB()
+	resp.TimeToLastByte = tr.TTLB()
+	
+	return nil
+}
 // isTimeoutError checks if the error is a network timeout error.
 func isTimeoutError(err error) bool {
 	if netErr, ok := err.(net.Error); ok {
