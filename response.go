@@ -19,6 +19,10 @@ type Response struct {
 	TimeToFirstByte time.Duration // Time until first response byte received
 	TimeToLastByte  time.Duration // Time until last response byte received
 
+	// req is the originating request, used by ParseRawdata to correctly
+	// handle HEAD responses (no body even with Content-Length).
+	req *Request
+
 	parsed     bool
 	httpLine   []byte
 	statusCode int
@@ -45,6 +49,7 @@ func (obj *Response) Reset() {
 	obj.statusCode = 0
 	obj.preBody = nil
 	obj.body = nil
+	obj.req = nil
 }
 
 func (obj *Response) Body() []byte {
@@ -73,7 +78,7 @@ func (obj *Response) ParseRawdata() error {
 		return nil
 	}
 
-	resp, err := ReadResponse(bufio.NewReader(bytes.NewReader(obj.Rawdata)), nil)
+	resp, err := ReadResponse(bufio.NewReader(bytes.NewReader(obj.Rawdata)), obj.req)
 	if err != nil {
 		return err
 	}

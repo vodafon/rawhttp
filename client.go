@@ -345,6 +345,7 @@ func (obj *Client) doConnWithPool(conn net.Conn, req *Request, resp *Response, p
 // If EOF is received without any data, it returns io.EOF as an error
 // (indicating a stale/closed connection rather than a valid empty response).
 func (obj *Client) doConnInternal(conn net.Conn, req *Request, resp *Response) error {
+	resp.req = req // Store request for HEAD-aware response parsing
 	// fmt.Printf("===DEBUG=== RAW:\n%q\n", req.Bytes())
 	if _, err := conn.Write(req.Bytes()); err != nil {
 		return err

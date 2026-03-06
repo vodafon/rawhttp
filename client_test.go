@@ -1033,3 +1033,91 @@ func TestClient_Do_CONNECT(t *testing.T) {
 		t.Error("Do() with CONNECT to non-listening addr should error")
 	}
 }
+
+func TestDoConnInternal_HEAD(t *testing.T) {
+	// HEAD responses include Content-Length but no body.
+	// The client must correctly parse StatusCode, Header, Body.
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		// HEAD response: has Content-Length but NO body
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 12345\r\nContent-Type: text/html\r\n\r\n"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	// Verify ParseRawdata works (via accessor methods)
+	if resp.StatusCode() != 200 {
+		t.Errorf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+
+	if resp.Header("Content-Type") != "text/html" {
+		t.Errorf("Header(Content-Type) = %q, want text/html", resp.Header("Content-Type"))
+	}
+
+	// HEAD response should have empty body
+	if len(resp.Body()) != 0 {
+		t.Errorf("Body() = %q, want empty for HEAD response", resp.Body())
+	}
+}
+
+func TestDoConnInternal_HEAD_Chunked(t *testing.T) {
+	// HEAD response with Transfer-Encoding: chunked but no body.
+	client := &Client{
+		TransformRequestFunc: PrepareRequest,
+		Timeout:              2 * time.Second,
+		QuietTimeout:         10 * time.Millisecond,
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		br := bufio.NewReader(serverConn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		serverConn.Write([]byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"))
+		serverConn.Close()
+	}()
+
+	req := simpleTestRequest("HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp := &Response{}
+
+	err := client.doConnInternal(clientConn, req, resp)
+	if err != nil {
+		t.Fatalf("doConnInternal() error: %v", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		t.Errorf("StatusCode() = %d, want 200", resp.StatusCode())
+	}
+
+	if len(resp.Body()) != 0 {
+		t.Errorf("Body() = %q, want empty for HEAD response", resp.Body())
+	}
+}
