@@ -10,7 +10,6 @@ rawhttp is a raw HTTP client library designed for security research and MITM pro
 - **Purpose**: High-fidelity HTTP client for prookproxy.
 - **Dependencies**:
     - `github.com/andybalholm/brotli v1.2.0`
-    - `github.com/vodafon/vgutils`
     - `golang.org/x/net v0.49.0`
 
 ## Build & Test Commands
@@ -119,5 +118,4 @@ func (obj *Response) WriteTo(w io.Writer) (int64, error)
 ## Dependencies
 
 - `github.com/andybalholm/brotli`: Brotli decompression.
-- `github.com/vodafon/vgutils`: Utility functions like `RandomHEXString`.
 - `golang.org/x/net`: `proxy.Dialer` interface.

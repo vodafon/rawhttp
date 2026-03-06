@@ -2,12 +2,12 @@ package rawhttp
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
-
-	"github.com/vodafon/vgutils"
 )
 
 type Request struct {
@@ -45,7 +45,9 @@ func (obj *Request) SetBody(body []byte) {
 }
 
 func (obj *Request) CacheBusterParam() {
-	param := vgutils.RandomHEXString(4)
+	buf := make([]byte, 4)
+	rand.Read(buf)
+	param := hex.EncodeToString(buf)
 	obj.AddQueryParams([]byte(fmt.Sprintf("%s=%s", param, param)))
 }
 
