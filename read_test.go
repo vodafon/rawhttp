@@ -110,6 +110,23 @@ func TestReadRequest(t *testing.T) {
 			wantVer:    "HTTP/1.1",
 			wantBody:   "",
 		},
+		// Simplified BurpLike HTTP/2 format (HTTP/2 version token)
+		{
+			name:       "simplified BurpLike H2 GET no body",
+			input:      "GET /path HTTP/2\r\nHost: example.com\r\n\r\n",
+			wantMethod: "GET",
+			wantPath:   "/path",
+			wantVer:    "HTTP/2",
+			wantBody:   "",
+		},
+		{
+			name:       "simplified BurpLike H2 POST with body",
+			input:      "POST /api HTTP/2\r\nHost: api.com\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"key\":\"value\"}",
+			wantMethod: "POST",
+			wantPath:   "/api",
+			wantVer:    "HTTP/2",
+			wantBody:   `{"key":"value"}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -365,6 +382,25 @@ func TestReadResponse(t *testing.T) {
 		{
 			name:           "200 with zero Content-Length",
 			input:          "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+			wantStatusCode: 200,
+			wantBody:       "",
+		},
+		// Simplified BurpLike HTTP/2 format (HTTP/2 version token)
+		{
+			name:           "simplified BurpLike H2 200 OK with body",
+			input:          "HTTP/2 200 OK\r\ncontent-type: text/html\r\nContent-Length: 4\r\n\r\nbody",
+			wantStatusCode: 200,
+			wantBody:       "body",
+		},
+		{
+			name:           "simplified BurpLike H2 404 Not Found",
+			input:          "HTTP/2 404 Not Found\r\n\r\n",
+			wantStatusCode: 404,
+			wantBody:       "",
+		},
+		{
+			name:           "simplified BurpLike H2 200 no reason phrase",
+			input:          "HTTP/2 200\r\nContent-Length: 0\r\n\r\n",
 			wantStatusCode: 200,
 			wantBody:       "",
 		},
